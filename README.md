@@ -168,7 +168,7 @@ Rust 核心库位于 `crates/geatpy_core/`，涵盖了进化算法全套 70+ 个
 ## 👤 维护者与版权 (Maintainer & Copyright)
 
 - **Rust Core 发行版维护者**: yangyachao ([www.yangyachao.com](https://www.yangyachao.com))
-- **联系邮箱**: [yangyachao@outlook.com](mailto:yangyachao@outlook.com)
+- **联系邮箱**: [yangyachao@live.cn](mailto:yangyachao@live.cn)
 - **代码仓库**: [https://github.com/yangyachao/geatpy](https://github.com/yangyachao/geatpy)
 
 ### 版权声明 (Copyright Notice)

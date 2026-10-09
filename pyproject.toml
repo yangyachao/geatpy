@@ -10,17 +10,12 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "LGPL-3.0" }
 authors = [
-    { name = "yangyachao", email = "yangyachao@outlook.com" },
+    { name = "yangyachao", email = "yangyachao@live.cn" },
     { name = "Geatpy Development Team" }
 ]
 maintainers = [
-    { name = "yangyachao", email = "yangyachao@outlook.com" }
+    { name = "yangyachao", email = "yangyachao@live.cn" }
 ]
-
-[project.urls]
-Homepage = "https://www.yangyachao.com"
-Repository = "https://github.com/yangyachao/geatpy"
-Issues = "https://github.com/yangyachao/geatpy/issues"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
@@ -41,6 +36,11 @@ dependencies = [
     "matplotlib>=3.0.0",
     "scipy>=1.0.0",
 ]
+
+[project.urls]
+Homepage = "https://www.yangyachao.com"
+Repository = "https://github.com/yangyachao/geatpy"
+Issues = "https://github.com/yangyachao/geatpy/issues"
 
 [tool.maturin]
 manifest-path = "crates/geatpy_core/Cargo.toml"
