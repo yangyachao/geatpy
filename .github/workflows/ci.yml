@@ -19,6 +19,10 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.14-dev"
 
+    env:
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
+
     steps:
       - uses: actions/checkout@v4
 

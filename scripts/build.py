@@ -18,21 +18,27 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Force UTF-8 stream handling if supported
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = REPO_ROOT / "dist"
 
 
 def run_cmd(cmd, check=True):
-    print(f"\033[34m[执行命令]\033[0m {' '.join(str(c) for c in cmd)}")
+    print(f"\033[34m[CMD]\033[0m {' '.join(str(c) for c in cmd)}")
     res = subprocess.run(cmd, cwd=str(REPO_ROOT))
     if check and res.returncode != 0:
-        print(f"\033[31m[错误] 命令执行失败 (退出代码 {res.returncode})\033[0m")
+        print(f"\033[31m[ERROR] Command failed with exit code {res.returncode}\033[0m")
         sys.exit(res.returncode)
     return res.returncode
 
 
 def ensure_toolchain():
-    # 检查 cargo
+    # Check cargo
     cargo_bin = shutil.which("cargo")
     if not cargo_bin:
         cargo_home = Path.home() / ".cargo" / "bin" / ("cargo.exe" if os.name == "nt" else "cargo")
@@ -40,32 +46,32 @@ def ensure_toolchain():
             os.environ["PATH"] = str(cargo_home.parent) + os.pathsep + os.environ.get("PATH", "")
             cargo_bin = str(cargo_home)
         else:
-            print("\033[31m[错误] 未检测到 Rust 编译器 (cargo)。请先访问 https://rustup.rs/ 安装 Rust。\033[0m")
+            print("\033[31m[ERROR] Rust toolchain (cargo) not found. Please install Rust from https://rustup.rs/\033[0m")
             sys.exit(1)
 
-    print(f"\033[32m[检测] Rust 工具链:\033[0m {cargo_bin}")
+    print(f"\033[32m[INFO] Rust toolchain:\033[0m {cargo_bin}")
 
-    # 检查 maturin
+    # Check maturin
     try:
         import maturin  # noqa: F401
     except ImportError:
-        print("\033[33m[提示] 正在安装构建工具 maturin...\033[0m")
+        print("\033[33m[INFO] Installing maturin build tool...\033[0m")
         run_cmd([sys.executable, "-m", "pip", "install", "maturin>=1.5"])
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Geatpy 跨平台自动化打包构建工具")
-    parser.add_argument("--install", "-i", action="store_true", help="构建后直接安装至当前 Python 环境")
-    parser.add_argument("--test", "-t", action="store_true", help="构建并安装后运行 pytest 测试")
-    parser.add_argument("--sdist", "-s", action="store_true", help="同时构建源码包 (sdist)")
-    parser.add_argument("--debug", "-d", action="store_true", help="以 Debug 模式构建 (默认 Release)")
-    parser.add_argument("--target", help="指定编译的目标平台架构 (如 x86_64-pc-windows-msvc, aarch64-apple-darwin)")
+    parser = argparse.ArgumentParser(description="Geatpy cross-platform automated build tool")
+    parser.add_argument("--install", "-i", action="store_true", help="Install built wheel to current environment")
+    parser.add_argument("--test", "-t", action="store_true", help="Build, install and run pytest test suite")
+    parser.add_argument("--sdist", "-s", action="store_true", help="Build source distribution (.tar.gz)")
+    parser.add_argument("--debug", "-d", action="store_true", help="Build in debug mode (default is release)")
+    parser.add_argument("--target", help="Specify compilation target architecture")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("      Geatpy (Rust Core) 跨平台打包与构建工具")
+    print("      Geatpy (Rust Core) Cross-Platform Build Tool")
     print(f"      Python: {sys.version.split()[0]} ({sys.executable})")
-    print(f"      工作目录: {REPO_ROOT}")
+    print(f"      Working Dir: {REPO_ROOT}")
     print("=" * 60)
 
     ensure_toolchain()
@@ -90,33 +96,40 @@ def main():
     if args.target:
         build_cmd.extend(["--target", args.target])
 
-    print("\n\033[32m[1/3] 开始构建 Geatpy Wheel...\033[0m")
+    print("\n\033[32m[1/3] Building Geatpy Wheel...\033[0m")
     run_cmd(build_cmd)
 
-    # 查找最新生成的 wheel
+    # Find latest wheel
     wheels = sorted(DIST_DIR.glob("geatpy-*.whl"), key=os.path.getmtime, reverse=True)
     if not wheels:
-        print("\033[31m[错误] 未在 dist 目录找到生成的 wheel 文件\033[0m")
+        print("\033[31m[ERROR] No wheel found in dist directory\033[0m")
         sys.exit(1)
 
     latest_wheel = wheels[0]
-    print(f"\n\033[32m[2/3] 构建成功! 生成 Wheel:\033[0m {latest_wheel} ({latest_wheel.stat().st_size / 1024:.1f} KB)")
+    print(f"\n\033[32m[2/3] Build succeeded! Wheel:\033[0m {latest_wheel.name} ({latest_wheel.stat().st_size / 1024:.1f} KB)")
 
-    # 安装
+    # Install
     if args.install or args.test:
-        print(f"\n\033[32m[3/3] 安装 Wheel 至当前环境...\033[0m")
+        print(f"\n\033[32m[3/3] Installing wheel to current environment...\033[0m")
+        in_venv = sys.prefix != sys.base_prefix
         uv_bin = shutil.which("uv")
+        installed = False
         if uv_bin:
-            run_cmd([uv_bin, "pip", "install", "--reinstall", str(latest_wheel), "--python", sys.executable])
-        else:
-            run_cmd([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", str(latest_wheel)])
-        print("\033[32m[完成] 安装完成!\033[0m")
+            res = run_cmd([uv_bin, "pip", "install", "--reinstall", "--no-deps", "--break-system-packages", str(latest_wheel), "--python", sys.executable], check=False)
+            if res == 0:
+                installed = True
+        if not installed:
+            pip_cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", "--break-system-packages", str(latest_wheel)]
+            if not in_venv:
+                pip_cmd.append("--user")
+            run_cmd(pip_cmd)
+        print("\033[32m[DONE] Installation completed successfully!\033[0m")
 
-    # 测试
+    # Test
     if args.test:
-        print("\n\033[32m[测试] 执行 pytest 单元测试套件...\033[0m")
+        print("\n\033[32m[TEST] Running pytest test suite...\033[0m")
         run_cmd([sys.executable, "-m", "pytest", str(REPO_ROOT / "tests"), "-v"])
-        print("\033[32m[完成] 测试全部通过!\033[0m")
+        print("\033[32m[DONE] All tests passed!\033[0m")
 
 
 if __name__ == "__main__":
