@@ -1,3 +1,43 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "geatpy"
+version = "2.7.0"
+description = "The Genetic and Evolutionary Algorithm Toolbox for Python with High-Performance Rust Core"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "LGPL-3.0" }
+authors = [
+    { name = "Geatpy Development Team" }
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "numpy>=1.17.0",
+    "matplotlib>=3.0.0",
+    "scipy>=1.0.0",
+]
+
+[tool.maturin]
+manifest-path = "crates/geatpy_core/Cargo.toml"
+module-name = "_geatpy_core"
+python-packages = ["geatpy"]
+
 [tool.commitizen]
 name = "cz_conventional_commits"
 version = "2.7.0"

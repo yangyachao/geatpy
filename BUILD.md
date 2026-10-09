@@ -1,0 +1,99 @@
+# Geatpy 打包与构建指南 (Build & Packaging Guide)
+
+本项目核心算子已采用 **Rust (PyO3 + abi3-py38)** 完整重写，兼具极致计算性能与跨平台、跨 Python 版本的通用兼容性。
+
+---
+
+## 快速打包脚本索引
+
+| 脚本文件 | 适用场景 | 常用命令 |
+| :--- | :--- | :--- |
+| [`scripts/build.sh`](file:///home/kaiquan/kaiquan/geatpy/scripts/build.sh) | Linux / macOS 本地一键打包与安装 | `./scripts/build.sh --test` |
+| [`scripts/build.py`](file:///home/kaiquan/kaiquan/geatpy/scripts/build.py) | Windows / macOS / Linux 跨平台构建 | `python scripts/build.py --test` |
+| [`scripts/build_wheels.sh`](file:///home/kaiquan/kaiquan/geatpy/scripts/build_wheels.sh) | 生产级发布包 (Wheel + sdist) 导出 | `./scripts/build_wheels.sh` |
+| [`.github/workflows/release.yml`](file:///home/kaiquan/kaiquan/geatpy/.github/workflows/release.yml) | GitHub Actions 多平台自动化发布流水线 | 推送标签 `v*` 自动触发 |
+
+---
+
+## 一、本地开发与构建
+
+### 1. 前置依赖
+- **Python**: `>= 3.8` (支持 Python 3.8 ~ 3.14+)
+- **Rust**: 安装 `cargo` 与 `rustc` (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- **Maturin**: `pip install maturin>=1.5`
+
+### 2. 常用开发命令
+
+#### 模式 A：使用 `build.sh` (Linux / macOS)
+```bash
+# 1. 编译并打包 Wheel 到 dist/ 目录
+./scripts/build.sh
+
+# 2. 编译并直接安装到当前 Python 环境
+./scripts/build.sh --install
+
+# 3. 编译、安装并运行全部单元测试
+./scripts/build.sh --test
+
+# 4. 同时生成源码包 (sdist .tar.gz)
+./scripts/build.sh --sdist
+```
+
+#### 模式 B：使用 `build.py` (Windows / Linux / macOS 通用)
+```bash
+# 1. 编译并打包 Wheel 到 dist/ 目录
+python scripts/build.py
+
+# 2. 编译、安装并运行单元测试
+python scripts/build.py --test
+
+# 3. 同时生成源码包 (sdist .tar.gz)
+python scripts/build.py --sdist
+```
+
+#### 模式 C：标准 pip 安装
+```bash
+# 开启 editable 模式进行代码开发
+pip install -e .
+
+# 或者直接从源码安装
+pip install .
+```
+
+---
+
+## 二、生产级发布打包 (Wheel & sdist)
+
+运行发布打包脚本：
+```bash
+./scripts/build_wheels.sh
+```
+
+构建完成后产物位于 `dist/` 目录下：
+- `dist/geatpy-2.7.0-cp38-abi3-<platform>_<arch>.whl`：针对该操作系统的二进制 Wheel。
+- `dist/geatpy-2.7.0.tar.gz`：通用的源码分发包 (sdist)。
+
+> **特性说明**：由于开启了 Python **abi3-py38** 特性，编译出的单个二进制 Wheel 可直接在 **Python 3.8、3.9、3.10、3.11、3.12、3.13、3.14+** 下直接加载运行，无需针对每个 Python 小版本分别编译。
+
+发布到 PyPI：
+```bash
+pip install twine
+twine upload dist/*
+```
+
+---
+
+## 三、GitHub Actions CI/CD 多平台自动化流水线
+
+项目配置了完整的自动化构建流程：
+1. **持续集成 ([`.github/workflows/ci.yml`](file:///home/kaiquan/kaiquan/geatpy/.github/workflows/ci.yml))**：
+   - 每次 Push 或 PR 时，在 Ubuntu、macOS、Windows 三大系统并发测试 Python 3.8 至 3.14。
+2. **多平台发布流水线 ([`.github/workflows/release.yml`](file:///home/kaiquan/kaiquan/geatpy/.github/workflows/release.yml))**：
+   - 当向仓库推送标签（如 `git push origin v2.7.0`）时自动启动。
+   - 自动化跨平台编译构建：
+     - `manylinux` x86_64
+     - `manylinux` aarch64 (ARM64)
+     - macOS universal2 (兼容 Intel 与 Apple Silicon M1/M2/M3/M4)
+     - Windows x86_64
+     - 源码包 `sdist`
+   - 自动生成 GitHub Release 附件并发布至 PyPI。
