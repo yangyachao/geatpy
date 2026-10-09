@@ -108,7 +108,7 @@ fi
 echo -e "${GREEN}[3/5] 开始构建 Geatpy (包含 Rust 原生核心)...${NC}"
 ${MATURIN_CMD} build "${BUILD_OPTS[@]}"
 
-LATEST_WHEEL=$(ls -t "${DIST_DIR}"/geatpy-*.whl 2>/dev/null | head -n 1)
+LATEST_WHEEL=$(ls -t "${DIST_DIR}"/geatpy*.whl 2>/dev/null | head -n 1)
 echo -e "${GREEN}[4/5] 构建成功! 生成 Wheel 文件:${NC}"
 ls -lh "${LATEST_WHEEL}"
 

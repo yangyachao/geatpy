@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "geatpy"
+name = "geatpy-rs"
 version = "2.7.0"
 description = "The Genetic and Evolutionary Algorithm Toolbox for Python with High-Performance Rust Core"
 readme = "README.md"

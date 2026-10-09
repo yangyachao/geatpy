@@ -100,7 +100,7 @@ def main():
     run_cmd(build_cmd)
 
     # Find latest wheel
-    wheels = sorted(DIST_DIR.glob("geatpy-*.whl"), key=os.path.getmtime, reverse=True)
+    wheels = sorted(DIST_DIR.glob("geatpy*.whl"), key=os.path.getmtime, reverse=True)
     if not wheels:
         print("\033[31m[ERROR] No wheel found in dist directory\033[0m")
         sys.exit(1)

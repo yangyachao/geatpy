@@ -43,25 +43,33 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 
 ## 📦 安装指南 (Installation)
 
-### 方式一：从 GitHub Releases 直接安装预编译 Wheel（最推荐）
+### 方式一：通过 pip 一键安装 (PyPI 推荐)
+
+```bash
+pip install geatpy-rs
+```
+
+> 💡 **提示**：分发包名为 `geatpy-rs`，在 Python 代码中完全无需改动，继续沿用熟悉的 **`import geatpy as ea`** 即可无缝调用！
+
+### 方式二：从 GitHub Releases 下载预编译 Wheel
 
 前往 [Releases 页面](https://github.com/yangyachao/geatpy/releases) 下载对应系统的 Wheel 文件，或通过链接一键安装：
 
 ```bash
 # Linux (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy-2.7.0-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy_rs-2.7.0-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
 # Linux (ARM64 / aarch64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy-2.7.0-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy_rs-2.7.0-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
 # macOS (Universal2 - 支持 Apple Silicon M1/M2/M3/M4 以及 Intel Mac)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy-2.7.0-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy_rs-2.7.0-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
 
 # Windows (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy-2.7.0-cp38-abi3-win_amd64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.0/geatpy_rs-2.7.0-cp38-abi3-win_amd64.whl
 ```
 
-### 方式二：从源码本地构建
+### 方式三：从源码本地构建
 
 克隆仓库后，仅需 Rust 工具链与 `maturin` 即可一键构建安装：
 
