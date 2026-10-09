@@ -2,7 +2,7 @@
 # flake8: noqa
 """import all libs of geatpy."""
 
-__author__ = "Geatpy Team"
+__author__ = "yangyachao, Geatpy Team"
 __version__ = "2.7.0"
 
 # import classes and mathods

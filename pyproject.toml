@@ -10,8 +10,17 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "LGPL-3.0" }
 authors = [
+    { name = "yangyachao", email = "yangyachao@outlook.com" },
     { name = "Geatpy Development Team" }
 ]
+maintainers = [
+    { name = "yangyachao", email = "yangyachao@outlook.com" }
+]
+
+[project.urls]
+Homepage = "https://www.yangyachao.com"
+Repository = "https://github.com/yangyachao/geatpy"
+Issues = "https://github.com/yangyachao/geatpy/issues"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
