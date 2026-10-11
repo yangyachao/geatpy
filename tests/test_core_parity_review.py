@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Regression tests for the second parity review (decompiled geatpy 2.7.0 core vs the Rust core).
+"""Regression tests for the second parity review (geatpy 2.7.0 core vs the Rust core).
 
 Every expected value below was produced by the original 2.7.0 binaries (docker, see scripts/parity).
 """

@@ -50,13 +50,13 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
 - **确定性算子**（非支配排序、拥挤距离、编码解码、适应度分配、参考点、指标、NSGA-III/RVEA 环境选择等）逐值比对；
 - **随机算子**（交叉、变异、选择）按统计特征比对；
 - **算法模板**（39 个单/多目标模板）比对最终解质量：`GEATPY_PARITY_TEMPLATES=1 pytest tests/test_core_parity.py`；
-- **逆向复核**（`tests/test_core_parity_review.py`）：对全部 75 个模块反编译后逐一对照，补齐了返回类型
+- **逐模块复核**（`tests/test_core_parity_review.py`）：对全部 75 个模块逐一核对，补齐了返回类型
   （全整数变量时返回 `int32`）、参数校验、`crtidp` 约束处理等细节，期望值均取自官方二进制的实际输出；
 - **随机差分与交叉审查**（`tests/test_core_parity_review2.py`、`scripts/parity/fuzz/`）：约 1500 个随机形状、参数组合与
   边界值用例同时在官方二进制与 Rust 内核上运行，逐项比对数值、dtype、返回结构与报错，随机算子比对统计分布；
-  并由另一模型（Antigravity）对照反编译代码独立审读。整数输出与官方一致为 `int32`，参数校验与报错信息与官方一致。
+  并由另一模型（Antigravity）独立交叉审查。整数输出与官方一致为 `int32`，参数校验与报错信息与官方一致。
 
-内核行为依据官方 docstring、黑盒差分结果以及对官方 2.7.0 二进制（LGPL）的逆向分析实现。
+内核行为依据官方文档、docstring 与上述差分测试结果实现。
 官方二进制中有几处与其自身文档不符的缺陷，本项目按文档实现，测试中单独说明：
 `ndsortDED` 分层错误、`mergecv` 跨行累加、`tcheby`/`pbi` 在 `idealPoint=None` 时返回理想点、
 `refselect` 候选矩阵行序错位、`migrate` 择劣替换（`Replacement=2`）实际淘汰的是最优个体、
