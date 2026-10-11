@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "geatpy-rs"
-version = "2.7.0"
+version = "2.7.1"
 description = "The Genetic and Evolutionary Algorithm Toolbox for Python with High-Performance Rust Core"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -50,7 +50,7 @@ python-packages = ["geatpy"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "2.7.0"
+version = "2.7.1"
 tag_format = "v$version"
 version_files = ["pyproject.toml:version","setup.py:version","geatpy/__init__.py:version"]
 

@@ -70,8 +70,8 @@ pip install .
 ```
 
 构建完成后产物位于 `dist/` 目录下：
-- `dist/geatpy-2.7.0-cp38-abi3-<platform>_<arch>.whl`：针对该操作系统的二进制 Wheel。
-- `dist/geatpy-2.7.0.tar.gz`：通用的源码分发包 (sdist)。
+- `dist/geatpy_rs-2.7.1-cp38-abi3-<platform>_<arch>.whl`：针对该操作系统的二进制 Wheel。
+- `dist/geatpy_rs-2.7.1.tar.gz`：通用的源码分发包 (sdist)。
 
 > **特性说明**：由于开启了 Python **abi3-py38** 特性，编译出的单个二进制 Wheel 可直接在 **Python 3.8、3.9、3.10、3.11、3.12、3.13、3.14、3.15** 下直接加载运行，无需针对每个 Python 小版本分别编译。
 
@@ -89,7 +89,7 @@ twine upload dist/*
 1. **持续集成 ([`.github/workflows/ci.yml`](file:///home/kaiquan/kaiquan/geatpy/.github/workflows/ci.yml))**：
    - 每次 Push 或 PR 时，在 Ubuntu、macOS、Windows 三大系统并发测试 Python 3.8 至 3.15。
 2. **多平台发布流水线 ([`.github/workflows/release.yml`](file:///home/kaiquan/kaiquan/geatpy/.github/workflows/release.yml))**：
-   - 当向仓库推送标签（如 `git push origin v2.7.0`）时自动启动。
+   - 当向仓库推送标签（如 `git push origin v2.7.1`）时自动启动。
    - 自动化跨平台编译构建：
      - `manylinux` x86_64
      - `manylinux` aarch64 (ARM64)
