@@ -7,6 +7,20 @@ on:
     branches: [master, main]
 
 jobs:
+  rust-lint:
+    name: Rust fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/geatpy_core
+      - run: cargo fmt --manifest-path crates/geatpy_core/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path crates/geatpy_core/Cargo.toml --release -- -D warnings
+
   test:
     name: Test on ${{ matrix.os }} (Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}

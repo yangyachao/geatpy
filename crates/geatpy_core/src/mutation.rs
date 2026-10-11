@@ -1,605 +1,876 @@
-use numpy::{IntoPyArray, PyArray2};
+use numpy::ndarray::{Array1, Array2};
+use numpy::IntoPyArray;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
 use rand::Rng;
 
-/// Polynomial Mutation
+use crate::utils::{bounds, chrom_out, fix_value, is_integer_like, knob, opt_int, per_gene, Knob};
+
+type Opt<'a, 'py> = Option<&'a Bound<'py, PyAny>>;
+
+fn require_ri(encoding: &str, name: &str) -> PyResult<()> {
+    if encoding != "RI" {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in {}: The encoding must be 'RI'. (编码方式必须为'RI'。)",
+            name
+        )));
+    }
+    Ok(())
+}
+
+fn default_pm(pm: Opt, d: usize) -> PyResult<Vec<f64>> {
+    per_gene(pm, d, 1.0 / (d.max(1) as f64), "Pm")
+}
+
+/// Polynomial mutation (Deb). Inputs are repaired first; the mutated value stays in range by construction.
 #[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field, pm=None, dis_i=20.0, fix_type=1, parallel=false))]
+#[pyo3(signature = (encoding, old_chrom, field_dr, pm=None, dis_i=None, fix_type=None, parallel=None, params7=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn mutpolyn<'py>(
     py: Python<'py>,
     encoding: &str,
     old_chrom: &Bound<'py, PyAny>,
-    field: &Bound<'py, PyAny>,
-    pm: Option<f64>,
-    dis_i: f64,
-    fix_type: i32,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, fix_type, parallel);
-    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let f_arr = crate::utils::to_f64_array2(field)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let lb = f_arr.row(0);
-    let ub = f_arr.row(1);
-    let var_types = f_arr.row(2);
-
-    let prob = pm.unwrap_or(1.0 / (d as f64).max(1.0)).clamp(0.0, 1.0);
-    let eta = dis_i.max(0.0);
-    let eta_plus_1 = eta + 1.0;
-    let inv_eta = 1.0 / eta_plus_1;
-
+    field_dr: &Bound<'py, PyAny>,
+    pm: Opt<'_, 'py>,
+    dis_i: Opt<'_, 'py>,
+    fix_type: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+    params7: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = (parallel, params7);
+    require_ri(encoding, "mutpolyn")?;
+    // A 1-D OldChrom is a single chromosome (the original has a dedicated 1-D path).
+    let one_d = old_chrom
+        .getattr("ndim")
+        .and_then(|v| v.extract::<usize>())
+        .map(|nd| nd == 1)
+        .unwrap_or(false);
+    let mut chrom = if one_d {
+        let v = crate::utils::to_f64_array1(old_chrom)?;
+        let l = v.len();
+        v.into_shape_with_order((1, l)).unwrap()
+    } else {
+        crate::utils::to_f64_array2(old_chrom)?
+    };
+    let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
+    let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
+    let pm = default_pm(pm, d)?;
+    let eta = per_gene(dis_i, d, 20.0, "DisI")?;
+    let fix = crate::utils::fix_type(fix_type, "mutpolyn")?;
     let mut rng = rand::thread_rng();
-
-    for i in 0..n_ind {
+    for i in 0..n {
         for j in 0..d {
-            if rng.gen_bool(prob) {
-                let y = chrom[[i, j]];
-                let yl = lb[j];
-                let yu = ub[j];
-                let span = yu - yl;
-
-                if span > 1e-12 {
-                    let delta1 = ((y - yl) / span).clamp(0.0, 1.0);
-                    let delta2 = ((yu - y) / span).clamp(0.0, 1.0);
-                    let u: f64 = rng.gen();
-
-                    let delta_q = if u <= 0.5 {
-                        let xy = 1.0 - delta1;
-                        let val = 2.0 * u + (1.0 - 2.0 * u) * xy.powf(eta_plus_1);
-                        val.max(0.0).powf(inv_eta) - 1.0
-                    } else {
-                        let xy = 1.0 - delta2;
-                        let val = 2.0 * (1.0 - u) + 2.0 * (u - 0.5) * xy.powf(eta_plus_1);
-                        1.0 - val.max(0.0).powf(inv_eta)
-                    };
-
-                    let mut mutated = (y + delta_q * span).clamp(yl, yu);
-                    if var_types[j] == 1.0 {
-                        mutated = mutated.round();
-                    }
-                    chrom[[i, j]] = mutated;
+            let mut x = if b.span[j] > 1e-15 {
+                fix_value(chrom[[i, j]], b.lb[j], b.ub[j], b.span[j], fix, &mut rng)
+            } else {
+                b.lb[j]
+            };
+            if b.span[j] > 1e-15 && rng.gen::<f64>() < pm[j] {
+                let e1 = eta[j] + 1.0;
+                let u: f64 = rng.gen();
+                if u > 0.5 {
+                    let dv = 2.0 * u - 1.0;
+                    let t = (1.0 - (b.ub[j] - x) / b.span[j]).powf(e1);
+                    x += (1.0 - ((1.0 - dv) + dv * t).powf(1.0 / e1)) * b.span[j];
+                } else {
+                    let t = (1.0 - (x - b.lb[j]) / b.span[j]).powf(e1);
+                    x += (((1.0 - 2.0 * u) * t + 2.0 * u).powf(1.0 / e1) - 1.0) * b.span[j];
                 }
             }
+            chrom[[i, j]] = if b.discrete[j] { x.round() } else { x };
         }
     }
-
-    Ok(chrom.into_pyarray(py))
+    if one_d {
+        let out = crate::utils::ri_out(py, chrom, &b.discrete)?;
+        return Ok(out.bind(py).call_method0("ravel")?.unbind());
+    }
+    crate::utils::ri_out(py, chrom, &b.discrete)
 }
 
-/// Gaussian Mutation
+fn standard_normal<R: Rng>(rng: &mut R) -> f64 {
+    rng.sample(rand_distr::StandardNormal)
+}
+
+/// Gaussian mutation. Sigma3 is three standard deviations: scalar, per-gene array,
+/// True (min distance to a bound) or False/None (0.5 * (ub - lb)).
 #[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field, pm=None, sigma=None, middle=None, fix_type=1, parallel=false))]
+#[pyo3(signature = (encoding, old_chrom, field_dr, pm=None, sigma3=None, middle=None, fix_type=None, parallel=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn mutgau<'py>(
     py: Python<'py>,
     encoding: &str,
     old_chrom: &Bound<'py, PyAny>,
-    field: &Bound<'py, PyAny>,
-    pm: Option<f64>,
-    sigma: Option<f64>,
-    middle: Option<f64>,
-    fix_type: i32,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, middle, fix_type, parallel);
+    field_dr: &Bound<'py, PyAny>,
+    pm: Opt<'_, 'py>,
+    sigma3: Opt<'_, 'py>,
+    middle: Opt<'_, 'py>,
+    fix_type: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = parallel;
+    require_ri(encoding, "mutgau")?;
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let f_arr = crate::utils::to_f64_array2(field)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let lb = f_arr.row(0);
-    let ub = f_arr.row(1);
-    let var_types = f_arr.row(2);
-
-    let prob = pm.unwrap_or(1.0 / (d as f64).max(1.0)).clamp(0.0, 1.0);
-    let sig = sigma.unwrap_or(0.1);
-    let mut rng = rand::thread_rng();
-
-    for i in 0..n_ind {
-        for j in 0..d {
-            if rng.gen_bool(prob) {
-                let y = chrom[[i, j]];
-                let span = ub[j] - lb[j];
-                let std = sig * span;
-                let norm: f64 = rng.sample(rand_distr::StandardNormal);
-                let mut mutated = (y + norm * std).clamp(lb[j], ub[j]);
-                if var_types[j] == 1.0 {
-                    mutated = mutated.round();
-                }
-                chrom[[i, j]] = mutated;
+    let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
+    let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
+    let pm = default_pm(pm, d)?;
+    let fix = crate::utils::fix_type(fix_type, "mutgau")?;
+    let middle = matches!(knob(middle)?, Some(Knob::Bool(true)));
+    // None => per-gene sigma derived from bounds; Some(true) => adaptive; per-gene fixed sigma otherwise.
+    let (adaptive, sigma): (bool, Option<Vec<f64>>) = match knob(sigma3)? {
+        None | Some(Knob::Bool(false)) => (false, None),
+        Some(Knob::Bool(true)) => (true, None),
+        Some(Knob::Scalar(s)) => (
+            false,
+            Some(
+                (0..d)
+                    .map(|j| {
+                        if b.discrete[j] {
+                            (s + 0.499999) / 3.0
+                        } else {
+                            s / 3.0
+                        }
+                    })
+                    .collect(),
+            ),
+        ),
+        Some(Knob::Array(v)) => {
+            if v.len() != d {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "error in mutgau: The length of Sigma3 must equal the chromosome length.",
+                ));
             }
+            (
+                false,
+                Some(
+                    (0..d)
+                        .map(|j| {
+                            if b.discrete[j] {
+                                (v[j] + 0.499999) / 3.0
+                            } else {
+                                v[j] / 3.0
+                            }
+                        })
+                        .collect(),
+                ),
+            )
+        }
+    };
+    let mut rng = rand::thread_rng();
+    for i in 0..n {
+        for j in 0..d {
+            let mut x;
+            if b.span[j] <= 1e-15 {
+                x = b.lb[j];
+            } else {
+                x = chrom[[i, j]];
+                if rng.gen::<f64>() < pm[j] {
+                    let s = if adaptive {
+                        (b.ub[j] - x).abs().min((x - b.lb[j]).abs()) / 3.0
+                    } else {
+                        match &sigma {
+                            Some(v) => v[j],
+                            None => (b.ub[j] - b.lb[j]) / 6.0,
+                        }
+                    };
+                    if middle {
+                        x = (b.lb[j] + b.ub[j]) * 0.5;
+                    }
+                    if s > 1e-15 {
+                        x += s * standard_normal(&mut rng);
+                    }
+                }
+                x = fix_value(x, b.lb[j], b.ub[j], b.span[j], fix, &mut rng);
+            }
+            chrom[[i, j]] = if b.discrete[j] { x.round() } else { x };
         }
     }
-
-    Ok(chrom.into_pyarray(py))
+    crate::utils::ri_out(py, chrom, &b.discrete)
 }
 
-/// Breeder Genetic Algorithm Mutation
+/// Breeder GA mutation (Mühlenbein & Schlierkamp-Voosen).
 #[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field, pm=None, mut_shrink=0.5, gradient=20, fix_type=1, parallel=false))]
+#[pyo3(signature = (encoding, old_chrom, field_dr, pm=None, mut_shrink=None, gradient=None, fix_type=None, parallel=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn mutbga<'py>(
     py: Python<'py>,
     encoding: &str,
     old_chrom: &Bound<'py, PyAny>,
-    field: &Bound<'py, PyAny>,
-    pm: Option<f64>,
-    mut_shrink: f64,
-    gradient: usize,
-    fix_type: i32,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, gradient, fix_type, parallel);
+    field_dr: &Bound<'py, PyAny>,
+    pm: Opt<'_, 'py>,
+    mut_shrink: Opt<'_, 'py>,
+    gradient: Opt<'_, 'py>,
+    fix_type: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = parallel;
+    require_ri(encoding, "mutbga")?;
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let f_arr = crate::utils::to_f64_array2(field)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let lb = f_arr.row(0);
-    let ub = f_arr.row(1);
-    let var_types = f_arr.row(2);
-
-    let prob = pm.unwrap_or(1.0 / (d as f64).max(1.0)).clamp(0.0, 1.0);
+    let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
+    let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
+    let pm = default_pm(pm, d)?;
+    let shrink = per_gene(mut_shrink, d, 0.5, "MutShrink")?;
+    let grad: Vec<i64> = per_gene(gradient, d, 20.0, "Gradient")?
+        .iter()
+        .map(|&g| g as i64)
+        .collect();
+    let fix = crate::utils::fix_type(fix_type, "mutbga")?;
+    // The mutation range doubles as the repair span, as in the reference implementation.
+    let range: Vec<f64> = (0..d).map(|j| b.span[j] * shrink[j]).collect();
     let mut rng = rand::thread_rng();
-
-    for i in 0..n_ind {
+    for i in 0..n {
         for j in 0..d {
-            if rng.gen_bool(prob) {
-                let y = chrom[[i, j]];
-                let span = ub[j] - lb[j];
-                let sign = if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
-                let mut sum_bits = 0.0;
-                for k in 0..16 {
-                    if rng.gen_bool(1.0 / 16.0) {
-                        sum_bits += 2.0_f64.powi(-(k as i32));
+            let mut x;
+            if range[j] <= 1e-15 {
+                x = b.lb[j];
+            } else {
+                x = chrom[[i, j]];
+                if rng.gen::<f64>() < pm[j] {
+                    let g = grad[j].max(1);
+                    let p = 1.0 / g as f64;
+                    let mut delta: f64 = (0..g)
+                        .filter(|_| rng.gen::<f64>() < p)
+                        .map(|k| 0.5f64.powi(k as i32))
+                        .sum();
+                    delta = delta.max(0.5f64.powi((g - 1) as i32));
+                    if rng.gen::<f64>() < 0.5 {
+                        delta = -delta;
                     }
+                    x += delta * range[j];
                 }
-                let delta = mut_shrink * span * sum_bits;
-                let mut mutated = (y + sign * delta).clamp(lb[j], ub[j]);
-                if var_types[j] == 1.0 {
-                    mutated = mutated.round();
-                }
-                chrom[[i, j]] = mutated;
+                x = fix_value(x, b.lb[j], b.ub[j], range[j], fix, &mut rng);
             }
+            chrom[[i, j]] = if b.discrete[j] { x.round() } else { x };
         }
     }
-
-    Ok(chrom.into_pyarray(py))
+    crate::utils::ri_out(py, chrom, &b.discrete)
 }
 
-/// Binary bit-flip mutation
+/// Uniform mutation within a radius Alpha around the current value (or the domain centre).
 #[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, pm=None, parallel=false))]
-pub fn mutbin<'py>(
-    py: Python<'py>,
-    encoding: &str,
-    old_chrom: &Bound<'py, PyAny>,
-    pm: Option<f64>,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, parallel);
-    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let prob = pm.unwrap_or(1.0 / (d as f64).max(1.0)).clamp(0.0, 1.0);
-    let mut rng = rand::thread_rng();
-
-    for i in 0..n_ind {
-        for j in 0..d {
-            if rng.gen_bool(prob) {
-                chrom[[i, j]] = if chrom[[i, j]] > 0.5 { 0.0 } else { 1.0 };
-            }
-        }
-    }
-
-    Ok(chrom.into_pyarray(py))
-}
-
-/// Differential Evolution Mutation
-fn extract_indices(elem: &Bound<'_, PyAny>, n_ind: usize) -> Option<Vec<usize>> {
-    if elem.is_none() {
-        return None;
-    }
-    if let Ok(arr) = elem.extract::<Vec<usize>>() {
-        return Some(arr);
-    }
-    if let Ok(arr) = elem.extract::<Vec<i64>>() {
-        return Some(arr.into_iter().map(|x| (x.rem_euclid(n_ind as i64)) as usize).collect());
-    }
-    if let Ok(arr) = elem.extract::<Vec<f64>>() {
-        return Some(arr.into_iter().map(|x| ((x as i64).rem_euclid(n_ind as i64)) as usize).collect());
-    }
-    if let Ok(ro) = elem.extract::<numpy::PyReadonlyArray1<i64>>() {
-        if let Ok(s) = ro.as_slice() {
-            return Some(s.iter().map(|&x| (x.rem_euclid(n_ind as i64)) as usize).collect());
-        }
-    }
-    if let Ok(ro) = elem.extract::<numpy::PyReadonlyArray1<f64>>() {
-        if let Ok(s) = ro.as_slice() {
-            return Some(s.iter().map(|&x| ((x as i64).rem_euclid(n_ind as i64)) as usize).collect());
-        }
-    }
-    if let Ok(ro) = elem.extract::<numpy::PyReadonlyArray2<i64>>() {
-        let arr = ro.as_array();
-        return Some(arr.iter().map(|&x| (x.rem_euclid(n_ind as i64)) as usize).collect());
-    }
-    if let Ok(ro) = elem.extract::<numpy::PyReadonlyArray2<f64>>() {
-        let arr = ro.as_array();
-        return Some(arr.iter().map(|&x| ((x as i64).rem_euclid(n_ind as i64)) as usize).collect());
-    }
-    None
-}
-
-/// Differential Evolution Mutation
-#[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field, xr_list=None, f=0.5, fix_type=1, parallel=false))]
-pub fn mutde<'py>(
-    py: Python<'py>,
-    encoding: &str,
-    old_chrom: &Bound<'py, PyAny>,
-    field: &Bound<'py, PyAny>,
-    xr_list: Option<&Bound<'py, PyAny>>,
-    f: f64,
-    fix_type: i32,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, parallel);
-    let chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let f_arr = crate::utils::to_f64_array2(field)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let lb = f_arr.row(0);
-    let ub = f_arr.row(1);
-    let var_types = f_arr.row(2);
-
-    let mut new_chrom = chrom.clone();
-    let mut rng = rand::thread_rng();
-
-    if n_ind < 2 {
-        return Ok(new_chrom.into_pyarray(py));
-    }
-
-    let mut parsed_xr: Vec<Option<Vec<usize>>> = Vec::new();
-    if let Some(xr_any) = xr_list {
-        if let Ok(seq) = xr_any.downcast::<pyo3::types::PySequence>() {
-            let len = seq.len().unwrap_or(0);
-            for idx in 0..len {
-                if let Ok(item) = seq.get_item(idx) {
-                    parsed_xr.push(extract_indices(&item, n_ind));
-                } else {
-                    parsed_xr.push(None);
-                }
-            }
-        }
-    }
-
-    for i in 0..n_ind {
-        let base_idx = if !parsed_xr.is_empty() && parsed_xr[0].as_ref().and_then(|v| v.get(i)).is_some() {
-            parsed_xr[0].as_ref().unwrap()[i]
-        } else {
-            let mut r = rng.gen_range(0..n_ind);
-            while r == i && n_ind > 1 {
-                r = rng.gen_range(0..n_ind);
-            }
-            r
-        };
-
-        let r1 = if parsed_xr.len() > 1 && parsed_xr[1].as_ref().and_then(|v| v.get(i)).is_some() {
-            parsed_xr[1].as_ref().unwrap()[i]
-        } else {
-            let mut r = rng.gen_range(0..n_ind);
-            while (r == i || r == base_idx) && n_ind > 2 {
-                r = rng.gen_range(0..n_ind);
-            }
-            r
-        };
-
-        let r2 = if parsed_xr.len() > 2 && parsed_xr[2].as_ref().and_then(|v| v.get(i)).is_some() {
-            parsed_xr[2].as_ref().unwrap()[i]
-        } else {
-            let mut r = rng.gen_range(0..n_ind);
-            while (r == i || r == base_idx || r == r1) && n_ind > 3 {
-                r = rng.gen_range(0..n_ind);
-            }
-            r
-        };
-
-        let has_pair2 = parsed_xr.len() >= 5;
-        let r3 = if has_pair2 && parsed_xr[3].as_ref().and_then(|v| v.get(i)).is_some() {
-            Some(parsed_xr[3].as_ref().unwrap()[i])
-        } else {
-            None
-        };
-        let r4 = if has_pair2 && parsed_xr[4].as_ref().and_then(|v| v.get(i)).is_some() {
-            Some(parsed_xr[4].as_ref().unwrap()[i])
-        } else {
-            None
-        };
-
-        for j in 0..d {
-            let mut v = chrom[[base_idx, j]] + f * (chrom[[r1, j]] - chrom[[r2, j]]);
-            if let (Some(idx3), Some(idx4)) = (r3, r4) {
-                v += f * (chrom[[idx3, j]] - chrom[[idx4, j]]);
-            }
-            let mut val = match fix_type {
-                2 => {
-                    if v < lb[j] || v > ub[j] {
-                        rng.gen_range(lb[j]..=ub[j])
-                    } else {
-                        v
-                    }
-                }
-                3 => {
-                    let mut x = v;
-                    if x < lb[j] {
-                        x = 2.0 * lb[j] - x;
-                    }
-                    if x > ub[j] {
-                        x = 2.0 * ub[j] - x;
-                    }
-                    x.clamp(lb[j], ub[j])
-                }
-                4 => {
-                    let span = ub[j] - lb[j];
-                    if span > 1e-12 {
-                        lb[j] + ((v - lb[j]) % span + span) % span
-                    } else {
-                        lb[j]
-                    }
-                }
-                _ => v.clamp(lb[j], ub[j]),
-            };
-            if var_types[j] == 1.0 {
-                val = val.round();
-            }
-            new_chrom[[i, j]] = val;
-        }
-    }
-
-    Ok(new_chrom.into_pyarray(py))
-}
-
-/// Inversion mutation for permutations
-#[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field=None, pm=None, invert_len=None, parallel=false))]
-pub fn mutinv<'py>(
-    py: Python<'py>,
-    encoding: &str,
-    old_chrom: &Bound<'py, PyAny>,
-    field: Option<&Bound<'py, PyAny>>,
-    pm: Option<f64>,
-    invert_len: Option<usize>,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, field, invert_len, parallel);
-    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let prob = pm.unwrap_or(0.1).clamp(0.0, 1.0);
-    let mut rng = rand::thread_rng();
-
-    if d < 2 {
-        return Ok(chrom.into_pyarray(py));
-    }
-
-    for i in 0..n_ind {
-        if rng.gen_bool(prob) {
-            let mut p1 = rng.gen_range(0..d);
-            let mut p2 = rng.gen_range(0..d);
-            if p1 > p2 {
-                std::mem::swap(&mut p1, &mut p2);
-            }
-            let mut l = p1;
-            let mut r = p2;
-            while l < r {
-                let tmp = chrom[[i, l]];
-                chrom[[i, l]] = chrom[[i, r]];
-                chrom[[i, r]] = tmp;
-                l += 1;
-                r -= 1;
-            }
-        }
-    }
-
-    Ok(chrom.into_pyarray(py))
-}
-
-/// Move / insertion mutation for permutations
-#[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field=None, pm=None, move_len=None, pr=None, parallel=false))]
-pub fn mutmove<'py>(
-    py: Python<'py>,
-    encoding: &str,
-    old_chrom: &Bound<'py, PyAny>,
-    field: Option<&Bound<'py, PyAny>>,
-    pm: Option<f64>,
-    move_len: Option<usize>,
-    pr: Option<f64>,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, field, move_len, pr, parallel);
-    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let prob = pm.unwrap_or(0.1).clamp(0.0, 1.0);
-    let mut rng = rand::thread_rng();
-
-    if d < 2 {
-        return Ok(chrom.into_pyarray(py));
-    }
-
-    for i in 0..n_ind {
-        if rng.gen_bool(prob) {
-            let src = rng.gen_range(0..d);
-            let dst = rng.gen_range(0..d);
-            if src != dst {
-                let mut row: Vec<f64> = (0..d).map(|j| chrom[[i, j]]).collect();
-                let val = row.remove(src);
-                row.insert(dst, val);
-                for j in 0..d {
-                    chrom[[i, j]] = row[j];
-                }
-            }
-        }
-    }
-
-    Ok(chrom.into_pyarray(py))
-}
-
-/// Swap mutation for permutations
-#[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field=None, pm=None, parallel=false))]
-pub fn mutswap<'py>(
-    py: Python<'py>,
-    encoding: &str,
-    old_chrom: &Bound<'py, PyAny>,
-    field: Option<&Bound<'py, PyAny>>,
-    pm: Option<f64>,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, field, parallel);
-    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let prob = pm.unwrap_or(0.1).clamp(0.0, 1.0);
-    let mut rng = rand::thread_rng();
-
-    if d < 2 {
-        return Ok(chrom.into_pyarray(py));
-    }
-
-    for i in 0..n_ind {
-        if rng.gen_bool(prob) {
-            let p1 = rng.gen_range(0..d);
-            let mut p2 = rng.gen_range(0..d);
-            while p2 == p1 {
-                p2 = rng.gen_range(0..d);
-            }
-            let tmp = chrom[[i, p1]];
-            chrom[[i, p1]] = chrom[[i, p2]];
-            chrom[[i, p2]] = tmp;
-        }
-    }
-
-    Ok(chrom.into_pyarray(py))
-}
-
-/// Uniform Mutation
-#[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field, pm=None, alpha=None, middle=None, fix_type=1, parallel=false))]
+#[pyo3(signature = (encoding, old_chrom, field_dr, pm=None, alpha=None, middle=None, fix_type=None, parallel=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn mutuni<'py>(
     py: Python<'py>,
     encoding: &str,
     old_chrom: &Bound<'py, PyAny>,
-    field: &Bound<'py, PyAny>,
-    pm: Option<f64>,
-    alpha: Option<f64>,
-    middle: Option<f64>,
-    fix_type: i32,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = (encoding, alpha, middle, fix_type, parallel);
+    field_dr: &Bound<'py, PyAny>,
+    pm: Opt<'_, 'py>,
+    alpha: Opt<'_, 'py>,
+    middle: Opt<'_, 'py>,
+    fix_type: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = parallel;
+    require_ri(encoding, "mutuni")?;
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let f_arr = crate::utils::to_f64_array2(field)?;
-    let n_ind = chrom.shape()[0];
-    let d = chrom.shape()[1];
-
-    let lb = f_arr.row(0);
-    let ub = f_arr.row(1);
-    let var_types = f_arr.row(2);
-
-    let prob = pm.unwrap_or(1.0 / (d as f64).max(1.0)).clamp(0.0, 1.0);
+    let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
+    let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
+    let pm = default_pm(pm, d)?;
+    let fix = crate::utils::fix_type(fix_type, "mutuni")?;
+    let middle = matches!(knob(middle)?, Some(Knob::Bool(true)));
+    let (adaptive, radius): (bool, Option<Vec<f64>>) = match knob(alpha)? {
+        None | Some(Knob::Bool(false)) => (false, None),
+        Some(Knob::Bool(true)) => (true, None),
+        Some(Knob::Scalar(a)) => (
+            false,
+            Some(
+                (0..d)
+                    .map(|j| if b.discrete[j] { a + 0.5 } else { a })
+                    .collect(),
+            ),
+        ),
+        Some(Knob::Array(v)) => {
+            if v.len() != d {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "error in mutuni: The length of Alpha must equal the chromosome length.",
+                ));
+            }
+            (
+                false,
+                Some(
+                    (0..d)
+                        .map(|j| if b.discrete[j] { v[j] + 0.5 } else { v[j] })
+                        .collect(),
+                ),
+            )
+        }
+    };
     let mut rng = rand::thread_rng();
-
-    for i in 0..n_ind {
+    for i in 0..n {
         for j in 0..d {
-            if rng.gen_bool(prob) {
-                let l = lb[j];
-                let u = ub[j];
-                let is_discrete = var_types[j] == 1.0;
-                let val = if is_discrete {
-                    let low = l.round() as i64;
-                    let high = u.round() as i64;
-                    if low <= high { rng.gen_range(low..=high) as f64 } else { low as f64 }
-                } else {
-                    if l < u { rng.gen_range(l..=u) } else { l }
-                };
-                chrom[[i, j]] = val;
+            let mut x;
+            if b.span[j] <= 1e-15 {
+                x = b.lb[j];
+            } else {
+                x = chrom[[i, j]];
+                if rng.gen::<f64>() < pm[j] {
+                    let r = if adaptive {
+                        (b.ub[j] - x).abs().min((x - b.lb[j]).abs())
+                    } else {
+                        match &radius {
+                            Some(v) => v[j],
+                            None => (b.ub[j] - b.lb[j]) * 0.5,
+                        }
+                    };
+                    if middle {
+                        x = (b.lb[j] + b.ub[j]) * 0.5;
+                    }
+                    x = x - r + 2.0 * r * rng.gen::<f64>();
+                }
+                x = fix_value(x, b.lb[j], b.ub[j], b.span[j], fix, &mut rng);
+            }
+            chrom[[i, j]] = if b.discrete[j] { x.round() } else { x };
+        }
+    }
+    crate::utils::ri_out(py, chrom, &b.discrete)
+}
+
+/// Bit-flip mutation for binary chromosomes.
+#[pyfunction]
+#[pyo3(signature = (encoding, old_chrom, params2=None, pm=None, parallel=None, params5=None, params6=None, params7=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn mutbin<'py>(
+    py: Python<'py>,
+    encoding: &str,
+    old_chrom: &Bound<'py, PyAny>,
+    params2: Opt<'_, 'py>,
+    pm: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+    params5: Opt<'_, 'py>,
+    params6: Opt<'_, 'py>,
+    params7: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = (params2, parallel, params5, params6, params7);
+    if encoding != "BG" {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "error in mutbin: The encoding must be 'BG'. (编码方式必须为'BG'。)",
+        ));
+    }
+    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
+    let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
+    let pm = default_pm(pm, d)?;
+    let mut rng = rand::thread_rng();
+    for i in 0..n {
+        for j in 0..d {
+            if rng.gen::<f64>() < pm[j] {
+                chrom[[i, j]] = 1.0 - chrom[[i, j]];
+            }
+        }
+    }
+    chrom_out(py, chrom, true)
+}
+
+/// Draw without replacement from `pool`; falls back to any index when the pool is exhausted.
+fn draw<R: Rng>(pool: &mut Vec<usize>, n: usize, rng: &mut R) -> usize {
+    if pool.is_empty() {
+        return rng.gen_range(0..n);
+    }
+    let k = rng.gen_range(0..pool.len());
+    pool.swap_remove(k)
+}
+
+enum Xr {
+    Random,
+    Index(Vec<usize>),
+    Vector(Array2<f64>),
+}
+
+/// Differential mutation: Xr0 + F1 (Xr1 - Xr2) [+ F2 (Xr3 - Xr4)].
+#[pyfunction]
+#[pyo3(signature = (encoding, old_chrom, field_dr, xr_list=None, f=None, fix_type=None, mask_n=None, parallel=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn mutde<'py>(
+    py: Python<'py>,
+    encoding: &str,
+    old_chrom: &Bound<'py, PyAny>,
+    field_dr: &Bound<'py, PyAny>,
+    xr_list: Opt<'_, 'py>,
+    f: Opt<'_, 'py>,
+    fix_type: Opt<'_, 'py>,
+    mask_n: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = parallel;
+    require_ri(encoding, "mutde")?;
+    let chrom = crate::utils::to_f64_array2(old_chrom)?;
+    let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
+    let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
+    let fix = crate::utils::fix_type(fix_type, "mutde")?;
+
+    // Output rows, and an optional element mask.
+    let mut rows = n;
+    let mut mask: Option<Array2<bool>> = None;
+    if let Some(m) = mask_n {
+        if !m.is_none() {
+            if let Ok(k) = m.extract::<usize>() {
+                rows = k;
+            } else {
+                let arr = crate::utils::to_f64_array2(m)?;
+                if arr.shape()[1] != d {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "error in mutde: The number of columns of Mask_N must equal that of OldChrom.",
+                    ));
+                }
+                rows = arr.shape()[0];
+                mask = Some(arr.mapv(|x| x != 0.0));
             }
         }
     }
 
-    Ok(chrom.into_pyarray(py))
+    let mut xrs: Vec<Xr> = Vec::new();
+    if let Some(list) = xr_list {
+        if !list.is_none() {
+            for item in list.try_iter()? {
+                let item = item?;
+                if item.is_none() {
+                    xrs.push(Xr::Random);
+                    continue;
+                }
+                let ndim: usize = item.getattr("ndim").and_then(|v| v.extract()).unwrap_or(1);
+                if ndim >= 2 {
+                    let v = crate::utils::to_f64_array2(&item)?;
+                    if v.shape()[0] < rows || v.shape()[1] != d {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "error in mutde: The shape of a vector in XrList does not match.",
+                        ));
+                    }
+                    xrs.push(Xr::Vector(v));
+                } else {
+                    let v = crate::utils::to_f64_array1(&item)?;
+                    let idx: Vec<usize> = v
+                        .iter()
+                        .map(|&x| x as i64)
+                        .map(|x| {
+                            if x < 0 || x as usize >= n {
+                                usize::MAX
+                            } else {
+                                x as usize
+                            }
+                        })
+                        .collect();
+                    if idx.len() < rows || idx.iter().take(rows).any(|&x| x == usize::MAX) {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "error in mutde: The index in XrList is out of range. (XrList中的索引越界。)",
+                        ));
+                    }
+                    xrs.push(Xr::Index(idx));
+                }
+            }
+        }
+    }
+    let pairs = if xrs.len() > 3 { 2 } else { 1 };
+    while xrs.len() < 1 + 2 * pairs {
+        xrs.push(Xr::Random);
+    }
+
+    // F: scalar, [F1, F2] with None meaning "random in (0, 1) per individual", or None.
+    let parse_f = |o: &Bound<'py, PyAny>| -> PyResult<f64> {
+        if o.is_none() {
+            Ok(-1.0)
+        } else {
+            o.extract::<f64>()
+        }
+    };
+    let (f1, f2) = match f {
+        None => (-1.0, -1.0),
+        Some(o) if o.is_none() => (-1.0, -1.0),
+        Some(o) => {
+            if let Ok(v) = o.extract::<f64>() {
+                (v, v)
+            } else {
+                let items: Vec<Bound<'py, PyAny>> = o.try_iter()?.collect::<PyResult<_>>()?;
+                let a = items.first().map(&parse_f).transpose()?.unwrap_or(-1.0);
+                let c = items.get(1).map(parse_f).transpose()?.unwrap_or(a);
+                (a, c)
+            }
+        }
+    };
+
+    let mut rng = rand::thread_rng();
+    // Trial values of row i on `cols`, with freshly drawn donors and F (the target row is excluded
+    // from the donors when one offspring is produced per individual).
+    let trial = |i: usize, cols: &[usize], rng: &mut rand::rngs::ThreadRng| -> Vec<f64> {
+        let mut pool: Vec<usize> = (0..n).filter(|&k| !(rows == n && k == i)).collect();
+        let vecs: Vec<Vec<f64>> = xrs
+            .iter()
+            .take(1 + 2 * pairs)
+            .map(|x| match x {
+                Xr::Random => chrom.row(draw(&mut pool, n, rng)).to_vec(),
+                Xr::Index(idx) => chrom.row(idx[i]).to_vec(),
+                Xr::Vector(v) => v.row(i).to_vec(),
+            })
+            .collect();
+        let fa = if f1 < 0.0 { rng.gen::<f64>() } else { f1 };
+        let fb = if f2 < 0.0 { rng.gen::<f64>() } else { f2 };
+        cols.iter()
+            .map(|&j| {
+                let x = if b.span[j] > 1e-15 {
+                    let mut v = vecs[0][j] + fa * (vecs[1][j] - vecs[2][j]);
+                    if pairs == 2 {
+                        v += fb * (vecs[3][j] - vecs[4][j]);
+                    }
+                    fix_value(v, b.lb[j], b.ub[j], b.span[j], fix, rng)
+                } else {
+                    b.lb[j]
+                };
+                if b.discrete[j] {
+                    x.round()
+                } else {
+                    x
+                }
+            })
+            .collect()
+    };
+    if let Some(m) = mask {
+        // Mask_N matrix: like geatpy 2.7.0, every selected element gets its own donors and F.
+        let vals: Vec<f64> = m
+            .indexed_iter()
+            .filter(|(_, &on)| on)
+            .map(|((i, j), _)| trial(i, &[j], &mut rng)[0])
+            .collect();
+        return Ok(Array1::from(vals).into_pyarray(py).into_any().unbind());
+    }
+    let all_cols: Vec<usize> = (0..d).collect();
+    let mut out = Array2::<f64>::zeros((rows, d));
+    for i in 0..rows {
+        let row = trial(i, &all_cols, &mut rng);
+        out.row_mut(i).assign(&Array1::from(row));
+    }
+    crate::utils::ri_out(py, out, &b.discrete)
 }
 
-/// Permutation Mutation
+/// Segment length in [lo, max_len] such that every (start, length) pair is equally likely.
+fn segment_len<R: Rng>(l: usize, max_len: usize, lo: usize, rng: &mut R) -> usize {
+    let max_len = max_len.clamp(lo, l.max(lo));
+    let weights: Vec<usize> = (lo..=max_len).map(|k| l + 1 - k.min(l)).collect();
+    let total: usize = weights.iter().sum();
+    if total == 0 {
+        return lo;
+    }
+    let mut r = rng.gen_range(0..total);
+    for (k, w) in (lo..=max_len).zip(weights) {
+        if r < w {
+            return k;
+        }
+        r -= w;
+    }
+    max_len
+}
+
+/// Parses InvertLen / MoveLen: int => maximum length, [k] => fixed length, None => default.
+fn parse_len(obj: Opt, default: usize) -> PyResult<(usize, bool)> {
+    match obj {
+        None => Ok((default, false)),
+        Some(o) if o.is_none() => Ok((default, false)),
+        Some(o) => {
+            if let Ok(v) = o.extract::<f64>() {
+                Ok((v as usize, false))
+            } else {
+                let v: Vec<f64> = o.extract()?;
+                Ok((v.first().copied().unwrap_or(default as f64) as usize, true))
+            }
+        }
+    }
+}
+
+/// "Random repair" of the order mutations on 'RI' chromosomes (geatpy 2.7.0 semantics): every gene is
+/// checked against the bounds (integer variables widened by 0.499999), an out-of-range gene is redrawn
+/// uniformly in the range, a degenerate range collapses to lb, and integer genes are rounded.
+/// Returns the varTypes flags of FieldDR, or None when no FieldDR was given.
+fn random_repair_rows<R: Rng>(
+    chrom: &mut Array2<f64>,
+    field: Opt,
+    rng: &mut R,
+) -> PyResult<Option<Vec<bool>>> {
+    let Some(f) = field.filter(|f| !f.is_none()) else {
+        return Ok(None);
+    };
+    let d = chrom.shape()[1];
+    let b = bounds(&crate::utils::to_f64_array2(f)?, d, true)?;
+    for mut row in chrom.rows_mut() {
+        for j in 0..d {
+            let x = row[j];
+            let v = if b.span[j] <= 1e-15 {
+                b.lb[j]
+            } else if x < b.lb[j] || x > b.ub[j] {
+                b.lb[j] + rng.gen::<f64>() * b.span[j]
+            } else {
+                x
+            };
+            row[j] = if b.discrete[j] { v.round() } else { v };
+        }
+    }
+    Ok(Some(b.discrete))
+}
+
+/// Output of the order mutations: 'RI' follows varTypes (int32 when all integer), 'P' keeps the input type.
+fn order_out(
+    py: Python<'_>,
+    chrom: Array2<f64>,
+    discrete: Option<Vec<bool>>,
+    as_int: bool,
+) -> PyResult<PyObject> {
+    match discrete {
+        Some(d) => crate::utils::ri_out(py, chrom, &d),
+        None => chrom_out(py, chrom, as_int),
+    }
+}
+
+fn check_order_encoding(encoding: &str, name: &str) -> PyResult<()> {
+    if encoding != "P" && encoding != "RI" {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in {}: The encoding must be 'P' or 'RI'.",
+            name
+        )));
+    }
+    Ok(())
+}
+
+/// Inversion mutation: reverse one segment of each chromosome with probability Pm.
 #[pyfunction]
-#[pyo3(signature = (encoding, old_chrom, field=None, pm=None, mut_n=None, parallel=false))]
+#[pyo3(signature = (encoding, old_chrom, field_dr=None, pm=None, invert_len=None, parallel=None, params6=None, params7=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn mutinv<'py>(
+    py: Python<'py>,
+    encoding: &str,
+    old_chrom: &Bound<'py, PyAny>,
+    field_dr: Opt<'_, 'py>,
+    pm: Opt<'_, 'py>,
+    invert_len: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+    params6: Opt<'_, 'py>,
+    params7: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = (parallel, params6, params7);
+    check_order_encoding(encoding, "mutinv")?;
+    let as_int = is_integer_like(old_chrom);
+    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
+    let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
+    let pm = crate::utils::per_gene(pm, 1, 1.0, "Pm")?[0];
+    let (len, fixed) = parse_len(invert_len, l)?;
+    let len = len.min(l);
+    let mut rng = rand::thread_rng();
+    if l >= 2 {
+        for i in 0..n {
+            if rng.gen::<f64>() >= pm {
+                continue;
+            }
+            let k = if fixed {
+                len.max(1)
+            } else {
+                segment_len(l, len, 2, &mut rng)
+            };
+            let start = rng.gen_range(0..=(l - k));
+            let mut row = chrom.row_mut(i);
+            let seg: Vec<f64> = (start..start + k).map(|j| row[j]).collect();
+            for (t, v) in seg.into_iter().rev().enumerate() {
+                row[start + t] = v;
+            }
+        }
+    }
+    let discrete = if encoding == "RI" {
+        random_repair_rows(&mut chrom, field_dr, &mut rng)?
+    } else {
+        None
+    };
+    order_out(py, chrom, discrete, as_int)
+}
+
+/// Shift mutation: move one segment to another position, optionally reversing it with probability Pr.
+#[pyfunction]
+#[pyo3(signature = (encoding, old_chrom, field_dr=None, pm=None, move_len=None, pr=None, parallel=None, params7=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn mutmove<'py>(
+    py: Python<'py>,
+    encoding: &str,
+    old_chrom: &Bound<'py, PyAny>,
+    field_dr: Opt<'_, 'py>,
+    pm: Opt<'_, 'py>,
+    move_len: Opt<'_, 'py>,
+    pr: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+    params7: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = (parallel, params7);
+    check_order_encoding(encoding, "mutmove")?;
+    let as_int = is_integer_like(old_chrom);
+    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
+    let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
+    let pm = crate::utils::per_gene(pm, 1, 1.0, "Pm")?[0];
+    let pr = crate::utils::per_gene(pr, 1, 0.0, "Pr")?[0];
+    let (len, fixed) = parse_len(move_len, l)?;
+    let len = len.min(l.saturating_sub(1)).max(1);
+    let mut rng = rand::thread_rng();
+    if l >= 2 {
+        for i in 0..n {
+            if rng.gen::<f64>() >= pm {
+                continue;
+            }
+            let k = if fixed {
+                len
+            } else {
+                segment_len(l, len, 1, &mut rng)
+            };
+            let start = rng.gen_range(0..=(l - k));
+            let slots = l - k + 1;
+            let dest = (start + 1 + rng.gen_range(0..(l - k).max(1))) % slots;
+            let mut row: Vec<f64> = chrom.row(i).to_vec();
+            let mut seg: Vec<f64> = row.drain(start..start + k).collect();
+            if rng.gen::<f64>() < pr {
+                seg.reverse();
+            }
+            for (t, v) in seg.into_iter().enumerate() {
+                row.insert(dest + t, v);
+            }
+            for (j, v) in row.into_iter().enumerate() {
+                chrom[[i, j]] = v;
+            }
+        }
+    }
+    let discrete = if encoding == "RI" {
+        random_repair_rows(&mut chrom, field_dr, &mut rng)?
+    } else {
+        None
+    };
+    order_out(py, chrom, discrete, as_int)
+}
+
+/// Swap mutation: exchange two distinct genes of each chromosome with probability Pm.
+#[pyfunction]
+#[pyo3(signature = (encoding, old_chrom, field_dr=None, pm=None, parallel=None, params5=None, params6=None, params7=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn mutswap<'py>(
+    py: Python<'py>,
+    encoding: &str,
+    old_chrom: &Bound<'py, PyAny>,
+    field_dr: Opt<'_, 'py>,
+    pm: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+    params5: Opt<'_, 'py>,
+    params6: Opt<'_, 'py>,
+    params7: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = (parallel, params5, params6, params7);
+    check_order_encoding(encoding, "mutswap")?;
+    let as_int = is_integer_like(old_chrom);
+    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
+    let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
+    let pm = crate::utils::per_gene(pm, 1, 1.0, "Pm")?[0];
+    let mut rng = rand::thread_rng();
+    if l >= 2 {
+        for i in 0..n {
+            if rng.gen::<f64>() < pm {
+                let a = rng.gen_range(0..l);
+                let b = (a + 1 + rng.gen_range(0..l - 1)) % l;
+                chrom.swap([i, a], [i, b]);
+            }
+        }
+    }
+    let discrete = if encoding == "RI" {
+        random_repair_rows(&mut chrom, field_dr, &mut rng)?
+    } else {
+        None
+    };
+    order_out(py, chrom, discrete, as_int)
+}
+
+/// Permutation-point mutation: replace MutN genes by other values of [lb, ub],
+/// swapping with the gene that already holds the new value.
+#[pyfunction]
+#[pyo3(signature = (encoding, old_chrom, field_dr=None, pm=None, mut_n=None, parallel=None, params6=None, params7=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn mutpp<'py>(
     py: Python<'py>,
     encoding: &str,
     old_chrom: &Bound<'py, PyAny>,
-    field: Option<&Bound<'py, PyAny>>,
-    pm: Option<f64>,
-    mut_n: Option<usize>,
-    parallel: bool,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let _ = mut_n;
-    mutswap(py, encoding, old_chrom, field, pm, parallel)
+    field_dr: Opt<'_, 'py>,
+    pm: Opt<'_, 'py>,
+    mut_n: Opt<'_, 'py>,
+    parallel: Opt<'_, 'py>,
+    params6: Opt<'_, 'py>,
+    params7: Opt<'_, 'py>,
+) -> PyResult<PyObject> {
+    let _ = (parallel, params6, params7);
+    if encoding != "P" {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "error in mutpp: The encoding must be 'P'.",
+        ));
+    }
+    let as_int = is_integer_like(old_chrom);
+    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
+    let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
+    let (lo, hi) = match field_dr {
+        Some(f) if !f.is_none() => {
+            let a = crate::utils::to_f64_array2(f)?;
+            (a[[0, 0]].round() as i64, a[[1, 0]].round() as i64)
+        }
+        _ => {
+            let mn = chrom.iter().cloned().fold(f64::INFINITY, f64::min);
+            let mx = chrom.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            (mn as i64, mx as i64)
+        }
+    };
+    let range = (hi - lo + 1).max(1) as usize;
+    let pm = crate::utils::per_gene(pm, 1, 1.0 / l.max(1) as f64, "Pm")?[0];
+    let times = (opt_int(mut_n, 1)?.max(0) as usize).min(l);
+    let mut rng = rand::thread_rng();
+    if l >= 1 && range >= 2 {
+        for i in 0..n {
+            if rng.gen::<f64>() >= pm {
+                continue;
+            }
+            // position of each value in the chromosome, or None when absent
+            let mut pos: Vec<Option<usize>> = vec![None; range];
+            for j in 0..l {
+                let v = (chrom[[i, j]] as i64 - lo) as usize;
+                if v < range {
+                    pos[v] = Some(j);
+                }
+            }
+            for _ in 0..times {
+                let a = rng.gen_range(0..l);
+                let old = (chrom[[i, a]] as i64 - lo) as usize;
+                let new = (old + 1 + rng.gen_range(0..range - 1)) % range;
+                match pos[new] {
+                    None => {
+                        chrom[[i, a]] = (lo + new as i64) as f64;
+                        pos[new] = Some(a);
+                        pos[old] = None;
+                    }
+                    Some(b) => {
+                        chrom.swap([i, a], [i, b]);
+                        pos.swap(old, new);
+                    }
+                }
+            }
+        }
+    }
+    chrom_out(py, chrom, as_int)
 }
 
-/// High-level Mutation Dispatcher
+/// Dispatcher kept for API compatibility: mutate(MUT_F, Encoding, OldChrom, ...) forwards the
+/// remaining arguments to the named operator.
 #[pyfunction]
-#[pyo3(signature = (mut_oper, encoding, old_chrom, field=None, **kwargs))]
+#[pyo3(signature = (mut_f, *args, **kwargs))]
 pub fn mutate<'py>(
     py: Python<'py>,
-    mut_oper: &str,
-    encoding: &str,
-    old_chrom: &Bound<'py, PyAny>,
-    field: Option<&Bound<'py, PyAny>>,
-    kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let mut pm = None;
-    if let Some(dict) = kwargs {
-        if let Some(val) = dict.get_item("Pm")? {
-            pm = Some(val.extract::<f64>()?);
-        }
+    mut_f: &str,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let name = mut_f.to_lowercase();
+    let allowed = [
+        "mutpolyn", "mutgau", "mutbga", "mutuni", "mutbin", "mutde", "mutinv", "mutmove",
+        "mutswap", "mutpp",
+    ];
+    if !allowed.contains(&name.as_str()) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in mutate: unknown operator {}.",
+            mut_f
+        )));
     }
-
-    match mut_oper.to_lowercase().as_str() {
-        "mutpolyn" => {
-            let f = field.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Field required for mutpolyn"))?;
-            mutpolyn(py, encoding, old_chrom, f, pm, 20.0, 1, false)
-        }
-        "mutgau" => {
-            let f = field.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Field required for mutgau"))?;
-            mutgau(py, encoding, old_chrom, f, pm, None, None, 1, false)
-        }
-        "mutbga" => {
-            let f = field.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Field required for mutbga"))?;
-            mutbga(py, encoding, old_chrom, f, pm, 0.5, 20, 1, false)
-        }
-        "mutbin" => mutbin(py, encoding, old_chrom, pm, false),
-        "mutde" => {
-            let f = field.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Field required for mutde"))?;
-            mutde(py, encoding, old_chrom, f, None, 0.5, 1, false)
-        }
-        "mutinv" => mutinv(py, encoding, old_chrom, None, pm, None, false),
-        "mutmove" => mutmove(py, encoding, old_chrom, None, pm, None, None, false),
-        "mutswap" => mutswap(py, encoding, old_chrom, None, pm, false),
-        "mutuni" => {
-            let f = field.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Field required for mutuni"))?;
-            mutuni(py, encoding, old_chrom, f, pm, None, None, 1, false)
-        }
-        "mutpp" => mutpp(py, encoding, old_chrom, None, pm, None, false),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unsupported mutation operator: {}",
-            mut_oper
-        ))),
-    }
+    let module = py
+        .import("_geatpy_core")
+        .or_else(|_| py.import("geatpy._geatpy_core"))?;
+    Ok(module.getattr(name.as_str())?.call(args, kwargs)?.unbind())
 }

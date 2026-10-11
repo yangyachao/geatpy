@@ -6,7 +6,6 @@ mod encoding;
 mod indicator;
 mod multiobjective;
 mod mutation;
-mod plot;
 mod recombination;
 mod selection;
 pub mod utils;
@@ -15,7 +14,6 @@ use encoding::*;
 use indicator::*;
 use multiobjective::*;
 use mutation::*;
-use plot::*;
 use recombination::*;
 use selection::*;
 
@@ -114,11 +112,7 @@ fn _geatpy_core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     indicator_submod.add_function(wrap_pyfunction!(HV, &indicator_submod)?)?;
     m.add_submodule(&indicator_submod)?;
 
-    // 7. Plotting
-    m.add_function(wrap_pyfunction!(moeaplot, m)?)?;
-    m.add_function(wrap_pyfunction!(soeaplot, m)?)?;
-    m.add_function(wrap_pyfunction!(trcplot, m)?)?;
-    m.add_function(wrap_pyfunction!(varplot, m)?)?;
+    // Plotting (moeaplot, soeaplot, trcplot, varplot) lives in geatpy/core/_plot.py.
 
     Ok(())
 }

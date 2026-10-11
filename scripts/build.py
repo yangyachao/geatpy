@@ -13,6 +13,7 @@ Geatpy 跨平台打包与构建脚本 (Windows / macOS / Linux 通用)
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,22 @@ def ensure_toolchain():
     except ImportError:
         print("\033[33m[INFO] Installing maturin build tool...\033[0m")
         run_cmd([sys.executable, "-m", "pip", "install", "maturin>=1.5"])
+
+
+def repair_macos_linkedit():
+    """On macOS, re-align the installed extension if dyld rejects it (local linker bug, see
+    scripts/macos_fix_linkedit.py). No-op everywhere else."""
+    if platform.system() != "Darwin":
+        return
+    probe = subprocess.run([sys.executable, "-c", "import _geatpy_core"], capture_output=True, text=True)
+    if probe.returncode == 0 or "mis-aligned LINKEDIT" not in probe.stderr:
+        return
+    locate = subprocess.run([sys.executable, "-c", "import importlib.util as u, os; "
+                             "print(os.path.dirname(u.find_spec('_geatpy_core').origin))"],
+                            capture_output=True, text=True, check=True)
+    for so in Path(locate.stdout.strip()).glob("_geatpy_core*.so"):
+        print(f"[INFO] Re-aligning LINKEDIT string table of {so.name} (macOS linker workaround)")
+        run_cmd([sys.executable, str(REPO_ROOT / "scripts" / "macos_fix_linkedit.py"), str(so)])
 
 
 def main():
@@ -123,6 +140,7 @@ def main():
             if not in_venv:
                 pip_cmd.append("--user")
             run_cmd(pip_cmd)
+        repair_macos_linkedit()
         print("\033[32m[DONE] Installation completed successfully!\033[0m")
 
     # Test

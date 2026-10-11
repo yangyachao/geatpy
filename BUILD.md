@@ -97,3 +97,34 @@ twine upload dist/*
      - Windows x86_64
      - 源码包 `sdist`
    - 自动生成 GitHub Release 附件并发布至 PyPI。
+
+---
+
+## 与官方 2.7.0 内核的一致性测试
+
+```bash
+# 快速部分（确定性算子逐值比对 + 随机算子统计比对），CI 中默认运行
+pytest tests/test_core_parity.py
+
+# 39 个算法模板的解质量对比（较慢）
+GEATPY_PARITY_TEMPLATES=1 pytest tests/test_core_parity.py -k template
+
+# 重新生成官方内核的基准数据（需要 Docker；在 linux/amd64 + Python 3.6 中运行官方二进制）
+./scripts/parity/run_original_core.sh --reps 5
+# 只更新算子部分、保留模板结果
+./scripts/parity/run_original_core.sh --skip-templates --merge
+```
+
+用例定义在 `tests/parity_cases.py`，原版与 Rust 两侧运行同一份代码。官方二进制中与其文档不符的缺陷登记在
+`KNOWN_ORIGINAL_DEFECTS`，对应算子按文档语义实现并由独立测试覆盖。
+
+## macOS：`mis-aligned LINKEDIT string pool`
+
+部分新版 Apple 链接器（如 Xcode 27 的 ld-27037）生成的动态库字符串表只有 4 字节对齐，导入时 dyld 会报
+`mis-aligned LINKEDIT string pool`。`scripts/build.py --install` 会自动检测并修复；手动修复：
+
+```bash
+python scripts/macos_fix_linkedit.py "$(python -c 'import importlib.util as u;print(u.find_spec("_geatpy_core").submodule_search_locations[0])')"/_geatpy_core.abi3.so
+```
+
+GitHub Actions 上构建的发布包不受影响。

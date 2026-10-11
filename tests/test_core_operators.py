@@ -5,7 +5,7 @@ import geatpy as ea
 def test_encoding_operators():
     # crtfld
     var_types = np.array([0, 1])
-    ranges = np.array([[0, 10], [0, 5]])
+    ranges = np.array([[0, 0], [10, 5]])  # first row: lower bounds, second row: upper bounds
     borders = np.array([[1, 1], [1, 1]])
     fld = ea.crtfld('RI', var_types, ranges, borders)
     assert fld.shape == (3, 2)
@@ -56,8 +56,8 @@ def test_selection_operators():
     fit_2n = np.array([1.0, 2.0, 5.0, 1.0])
     otos_res = ea.otos(fit_2n, 2)
     assert len(otos_res) == 2
-    assert otos_res[0] == 2  # fit_2n[2] = 5 > fit_2n[0] = 1
-    assert otos_res[1] == 1  # fit_2n[1] = 2 > fit_2n[3] = 1
+    # winners of (0 vs 2) and (1 vs 3); like geatpy 2.7.0 the order is randomised
+    assert sorted(otos_res.tolist()) == [1, 2]
 
     ecs_res = ea.ecs(fitn_v, 4)
     assert len(ecs_res) == 4

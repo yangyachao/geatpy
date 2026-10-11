@@ -26,12 +26,6 @@ def _wrap_callable(func):
             p_clean = p.lstrip('*')
             if p_clean:
                 known_params[p_clean.lower().replace('_', '')] = p_clean
-        if 'sigma' in known_params.values():
-            known_params['sigma3'] = 'sigma'
-        if 'dis_i' in known_params.values():
-            known_params['disi'] = 'dis_i'
-        if 'n' in known_params.values():
-            known_params['disi'] = 'n'
     except Exception:
         return func
 
@@ -73,11 +67,21 @@ for _attr in dir(_geatpy_core):
                 setattr(_mod, _attr, _obj)
                 sys.modules[_sub_mod_name] = _mod
 
+# Plotting is implemented in Python (matplotlib); expose it like the Rust operators.
+from geatpy.core import _plot as _plot_module  # noqa: E402
+
+for _attr in ('moeaplot', 'soeaplot', 'trcplot', 'varplot'):
+    _obj = getattr(_plot_module, _attr)
+    setattr(_current_module, _attr, _obj)
+    _mod = types.ModuleType(f"{__name__}.{_attr}")
+    setattr(_mod, _attr, _obj)
+    sys.modules[f"{__name__}.{_attr}"] = _mod
+
 # Meta path finder to dynamically resolve any geatpy.core.<name> imports
 class _CoreSubmoduleFinder:
     @classmethod
     def find_spec(cls, fullname, path=None, target=None):
-        if fullname.startswith("geatpy.core."):
+        if fullname.startswith("geatpy.core.") and not fullname.startswith("geatpy.core._"):
             name = fullname.split(".")[-1]
             if hasattr(_geatpy_core, name):
                 from importlib.machinery import ModuleSpec

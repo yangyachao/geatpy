@@ -35,9 +35,30 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 | **Python 版本支持** | 仅支持 Python 3.5 ~ 3.10 | **Python 3.8 ~ 3.14+ 全覆盖支持** |
 | **ABI 兼容性** | 每个 Python 版本需分别单独编译 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
 | **跨平台预编译** | Windows x64, Linux x64 (Mac 支持有限) | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
-| **代码与内存安全** | 存在原生裸指针与越界崩溃风险 | **Rust 强类型、严格边界检查与所有权保障，零段错误 (Zero Segfault)** |
-| **多核并行与性能** | C OpenMP 并行 | **Rayon 多核工作窃取调度与极致向量化加速** |
-| **API 兼容度** | 原版基准 | **100% 完全兼容原有 Python API、数据结构与算法模板，代码无缝平替** |
+| **代码与内存安全** | 存在原生裸指针与越界崩溃风险 | **纯安全 Rust（无 `unsafe`），非法输入抛出 Python 异常而非段错误** |
+| **多核并行与性能** | C OpenMP 并行 | 当前为单线程实现；`Parallel` 参数为兼容保留，暂不生效 |
+| **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
+
+---
+
+## ✅ 与官方 2.7.0 内核的一致性 (Parity)
+
+Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过黑盒差分测试持续验证：
+
+- **基准数据**：`scripts/parity/run_original_core.sh` 在 Docker (linux/amd64 + Python 3.6) 中运行官方二进制，
+  生成 `tests/fixtures/core_parity_orig_2_7_0.json`；
+- **确定性算子**（非支配排序、拥挤距离、编码解码、适应度分配、参考点、指标、NSGA-III/RVEA 环境选择等）逐值比对；
+- **随机算子**（交叉、变异、选择）按统计特征比对；
+- **算法模板**（39 个单/多目标模板）比对最终解质量：`GEATPY_PARITY_TEMPLATES=1 pytest tests/test_core_parity.py`；
+- **逆向复核**（`tests/test_core_parity_review.py`）：对全部 75 个模块反编译后逐一对照，补齐了返回类型
+  （全整数变量时返回 `int32`）、参数校验、`crtidp` 约束处理等细节，期望值均取自官方二进制的实际输出。
+
+内核行为依据官方 docstring、黑盒差分结果以及对官方 2.7.0 二进制（LGPL）的逆向分析实现。
+官方二进制中有几处与其自身文档不符的缺陷，本项目按文档实现，测试中单独说明：
+`ndsortDED` 分层错误、`mergecv` 跨行累加、`tcheby`/`pbi` 在 `idealPoint=None` 时返回理想点、
+`refselect` 候选矩阵行序错位、`migrate` 择劣替换（`Replacement=2`）实际淘汰的是最优个体、
+`mutgau`/`mutuni` 的 `Middle=True` 以 `(ub-lb)/2` 而非区间中点为中心、
+`crtip` 在边界为小数时会生成越界整数。
 
 ---
 
