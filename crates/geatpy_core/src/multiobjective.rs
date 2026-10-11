@@ -876,33 +876,32 @@ pub fn refgselect<'py>(
             .cloned()
             .filter(|&i| viol[i] <= 1e-12)
             .collect();
+        // As in geatpy 2.7.0 `cal_choose_flag`, the first member is the initial best and a later one
+        // replaces it only when strictly better; an individual at the ideal point (zero vector, APD
+        // NaN) therefore survives when it comes first in its group.
+        let first_strictly_best = |cands: &[usize], key: &dyn Fn(usize) -> f64| -> Option<usize> {
+            let (&first, rest) = cands.split_first()?;
+            Some(
+                rest.iter()
+                    .fold((first, key(first)), |b, &i| {
+                        let v = key(i);
+                        if v < b.1 {
+                            (i, v)
+                        } else {
+                            b
+                        }
+                    })
+                    .0,
+            )
+        };
         let best = if !feasible.is_empty() {
             let w = p_theta / gamma[k];
             let apd = |i: usize| (w * cos[[i, k]].clamp(-1.0, 1.0).acos() + 1.0) * norm[i];
-            feasible
-                .into_iter()
-                .fold((usize::MAX, f64::INFINITY), |b, i| {
-                    let a = apd(i);
-                    if a < b.1 {
-                        (i, a)
-                    } else {
-                        b
-                    }
-                })
-                .0
+            first_strictly_best(&feasible, &apd)
         } else {
-            members
-                .into_iter()
-                .fold((usize::MAX, f64::INFINITY), |b, i| {
-                    if viol[i] < b.1 {
-                        (i, viol[i])
-                    } else {
-                        b
-                    }
-                })
-                .0
+            first_strictly_best(&members, &|i: usize| viol[i])
         };
-        if best != usize::MAX {
+        if let Some(best) = best {
             flag[best] = true;
         }
     }
@@ -933,6 +932,38 @@ pub fn migrate<'py>(
         select.unwrap_or(0),
         replacement.unwrap_or(0),
     );
+    let checks = [
+        (
+            p > 1,
+            "The number of populations must be bigger than 1. (种群数目必须大于1。)",
+        ),
+        (
+            pop_sizes.iter().all(|&s| s > 0),
+            "The size of every population must be bigger than 0. (种群规模必须大于0。)",
+        ),
+        (
+            migr > 0.0 && migr <= 1.0,
+            "Migration rate must be in (0, 1]. (子种群间的迁移概率MIGR必须在(0, 1]之间。)",
+        ),
+        (
+            (0..=2).contains(&structure),
+            "Structure must be 0, 1 or 2. (迁移种群的结构Structure必须是0, 1或2。)",
+        ),
+        (
+            (0..=1).contains(&select),
+            "Select must be 0 or 1. (输入参数Select必须是0或1。)",
+        ),
+        (
+            (0..=2).contains(&replacement),
+            "Replacement must be 0, 1 or 2. (输入参数Replacement必须是0，1或2。)",
+        ),
+    ];
+    if let Some((_, msg)) = checks.iter().find(|(ok, _)| !ok) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in migrate: {}",
+            msg
+        )));
+    }
     let fits: Option<Vec<Vec<f64>>> = match fitn_vs {
         Some(f) if !f.is_none() => Some(
             f.try_iter()?

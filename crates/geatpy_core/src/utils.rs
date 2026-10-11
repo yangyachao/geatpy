@@ -136,18 +136,39 @@ pub fn is_integer_like(obj: &Bound<'_, PyAny>) -> bool {
         .unwrap_or(false)
 }
 
-/// Return a chromosome matrix, as int64 when the caller's input was an integer matrix.
+/// Return a chromosome matrix, as int32 when it holds integers: geatpy 2.7.0 returns int32 for every
+/// integer chromosome (crossovers and mutations of integer input, 'P' and 'BG' operators, decoders).
 pub fn chrom_out(py: Python<'_>, chrom: Array2<f64>, as_int: bool) -> PyResult<PyObject> {
     use numpy::IntoPyArray;
     if as_int {
         Ok(chrom
-            .mapv(|x| x.round() as i64)
+            .mapv(|x| x.round() as i32)
             .into_pyarray(py)
             .into_any()
             .unbind())
     } else {
         Ok(chrom.into_pyarray(py).into_any().unbind())
     }
+}
+
+/// Probability argument (Pm, XOVR, Pr, ...) that geatpy 2.7.0 requires to lie in [0, 1].
+pub fn check_prob(p: f64, op: &str, msg: &str) -> PyResult<f64> {
+    if !(0.0..=1.0).contains(&p) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in {}: {}",
+            op, msg
+        )));
+    }
+    Ok(p)
+}
+
+/// Pm in [0, 1], with geatpy 2.7.0's message.
+pub fn check_pm(p: f64, op: &str) -> PyResult<f64> {
+    check_prob(
+        p,
+        op,
+        "Pm must be in [0, 1]. (变异概率Pm必须在[0, 1]之间。)",
+    )
 }
 
 /// Output of an 'RI' operator: like geatpy 2.7.0, an int32 matrix when every variable is an integer

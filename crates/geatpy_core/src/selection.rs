@@ -33,8 +33,19 @@ fn sel_count(nsel: Opt, n: usize) -> PyResult<usize> {
     }
 }
 
-fn idx_out(py: Python<'_>, v: Vec<usize>) -> Bound<'_, PyArray1<i64>> {
+/// Selected indices as int32, like geatpy 2.7.0 (its C kernels fill np.int32 buffers).
+fn idx_out(py: Python<'_>, v: Vec<usize>) -> Bound<'_, PyArray1<i32>> {
+    Array1::from_iter(v.into_iter().map(|x| x as i32)).into_pyarray(py)
+}
+
+/// int64 indices for the operators geatpy 2.7.0 implements with numpy (urs, ecs, otos with Nsel = N).
+fn idx_out64(py: Python<'_>, v: Vec<usize>) -> Bound<'_, PyArray1<i64>> {
     Array1::from_iter(v.into_iter().map(|x| x as i64)).into_pyarray(py)
+}
+
+/// Whether `name` returns int64 indices for this call (see `idx_out64`).
+fn wide_output(name: &str, n: usize, nsel: usize) -> bool {
+    matches!(name, "urs" | "ecs") || (name == "otos" && nsel == n)
 }
 
 fn order_desc(fit: &[f64]) -> Vec<usize> {
@@ -173,10 +184,19 @@ fn rcs_idx(n: usize) -> Vec<usize> {
 /// result is the fittest among the j-th members of all chunks.
 fn otos_idx(fit: &[f64], nsel: usize) -> PyResult<Vec<usize>> {
     let n = fit.len();
-    if nsel == 0 || !n.is_multiple_of(nsel) {
+    if nsel == 0 {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "error in otos: Nsel must divide the population size. (Nsel必须能够整除种群个体数。)",
+            "error in otos: Nsel must be an integer and be or bigger than 1. (要选择的个体数Nsel必须是int类型而且要不小于1。)",
         ));
+    }
+    if !n.is_multiple_of(nsel) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "error in otos: Nsel must be exactly divisible by the number of individuals. (要选择的个体数Nsel必须能够被种群的个体数整除。)",
+        ));
+    }
+    if nsel == n {
+        // a single chunk: geatpy 2.7.0 returns np.arange(N) unchanged
+        return Ok((0..n).collect());
     }
     let mut out: Vec<usize> = (0..nsel)
         .map(|j| {
@@ -226,7 +246,7 @@ pub fn dup<'py>(
     nsel: usize,
     params2: Opt<'_, 'py>,
     params3: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params2, params3);
     Ok(idx_out(py, dup_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
@@ -242,7 +262,7 @@ pub fn ecs<'py>(
     params3: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let _ = (params2, params3);
-    Ok(idx_out(py, ecs_idx(&fitness_or_n(fitn_v_n)?, nsel)))
+    Ok(idx_out64(py, ecs_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
 
 /// Tournament selection with replacement.
@@ -254,7 +274,7 @@ pub fn tour<'py>(
     nsel: usize,
     tour: Option<usize>,
     parallel: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = parallel;
     Ok(idx_out(
         py,
@@ -271,7 +291,7 @@ pub fn etour<'py>(
     nsel: usize,
     tour: Option<usize>,
     parallel: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = parallel;
     Ok(idx_out(
         py,
@@ -288,7 +308,7 @@ pub fn rws<'py>(
     nsel: usize,
     params2: Opt<'_, 'py>,
     parallel: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params2, parallel);
     Ok(idx_out(py, rws_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
@@ -302,7 +322,7 @@ pub fn sus<'py>(
     nsel: usize,
     params2: Opt<'_, 'py>,
     parallel: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params2, parallel);
     Ok(idx_out(py, sus_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
@@ -318,7 +338,7 @@ pub fn urs<'py>(
     params3: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let _ = (params2, params3);
-    Ok(idx_out(py, urs_idx(fitness_or_n(fitn_v_n)?.len(), nsel)))
+    Ok(idx_out64(py, urs_idx(fitness_or_n(fitn_v_n)?.len(), nsel)))
 }
 
 /// Random compensation selection: r0 = (i + rg) % N with one random rg in [1, N).
@@ -330,7 +350,7 @@ pub fn rcs<'py>(
     params1: Opt<'_, 'py>,
     params2: Opt<'_, 'py>,
     parallel: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params1, params2, parallel);
     Ok(idx_out(py, rcs_idx(fitness_or_n(fitn_v_n)?.len())))
 }
@@ -344,7 +364,7 @@ pub fn rps<'py>(
     nsel: Opt<'_, 'py>,
     params2: Opt<'_, 'py>,
     params3: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params2, params3);
     let n = fitness_or_n(fitn_v_n)?.len();
     let k = match nsel {
@@ -368,25 +388,42 @@ pub fn otos<'py>(
     nsel: usize,
     params2: Opt<'_, 'py>,
     parallel: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<PyObject> {
     let _ = (params2, parallel);
-    Ok(idx_out(py, otos_idx(&fitness_or_n(fitn_v_n)?, nsel)?))
+    let fit = fitness_or_n(fitn_v_n)?;
+    let idx = otos_idx(&fit, nsel)?;
+    Ok(if wide_output("otos", fit.len(), nsel) {
+        idx_out64(py, idx).into_any().unbind()
+    } else {
+        idx_out(py, idx).into_any().unbind()
+    })
 }
 
-/// Dispatcher: selecting(SEL_F, FitnV_N, NSel, Parallel).
+/// Dispatcher: selecting(SEL_F, FitnV_N, NSel, params2, Parallel); params2 is passed on to the
+/// operator (the tournament size of tour/etour).
 #[pyfunction]
-#[pyo3(signature = (sel_f, fitn_v_n, nsel=None, parallel=None))]
+#[pyo3(signature = (sel_f, fitn_v_n, nsel=None, params2=None, parallel=None))]
 pub fn selecting<'py>(
     py: Python<'py>,
     sel_f: &str,
     fitn_v_n: &Bound<'py, PyAny>,
     nsel: Opt<'_, 'py>,
+    params2: Opt<'_, 'py>,
     parallel: Opt<'_, 'py>,
-) -> PyResult<Bound<'py, PyArray1<i64>>> {
+) -> PyResult<PyObject> {
     let _ = parallel;
     let fit = fitness_or_n(fitn_v_n)?;
     let k = sel_count(nsel, fit.len())?;
-    Ok(idx_out(py, select_by_name(sel_f, &fit, k, 2)?))
+    let tour = match params2 {
+        Some(p) if !p.is_none() && matches!(sel_f, "tour" | "etour") => p.extract::<usize>()?,
+        _ => 2,
+    };
+    let idx = select_by_name(sel_f, &fit, k, tour)?;
+    Ok(if wide_output(sel_f, fit.len(), k) {
+        idx_out64(py, idx).into_any().unbind()
+    } else {
+        idx_out(py, idx).into_any().unbind()
+    })
 }
 
 /// Multi-population selection. Selection runs over the merged populations; a population that gets
@@ -452,9 +489,25 @@ pub fn mselecting<'py>(
 }
 
 /// Single-objective column prepared for fitness assignment (minimisation, feasibility rule applied).
-fn prepared_column(obj_v: &Bound<'_, PyAny>, cv: Opt, maxormins: Opt) -> PyResult<Vec<f64>> {
+/// geatpy 2.7.0 only accepts an n*1 ndarray ObjV here.
+fn prepared_column(
+    obj_v: &Bound<'_, PyAny>,
+    cv: Opt,
+    maxormins: Opt,
+    shape_error: &str,
+) -> PyResult<Vec<f64>> {
+    let shape: Option<Vec<usize>> = obj_v.getattr("shape").and_then(|s| s.extract()).ok();
+    if !matches!(shape.as_deref(), Some([_, 1])) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            shape_error.to_string(),
+        ));
+    }
     let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
     Ok(obj.column(0).to_vec())
+}
+
+fn runtime_err(msg: &str) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(msg.to_string())
 }
 
 fn column(v: Vec<f64>) -> Array2<f64> {
@@ -495,8 +548,27 @@ pub fn ranking<'py>(
     sp: Option<f64>,
     mask: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let f = prepared_column(obj_v, cv, maxormins)?;
+    let f = prepared_column(
+        obj_v,
+        cv,
+        maxormins,
+        "error in ranking: ObjV must be a n*1 Numpy ndarray. (目标函数矩阵ObjV必须是n行1列的Numpy ndarray类型矩阵。)",
+    )?;
     let n = f.len();
+    // RM (called PM in the original messages) must be 0 or 1 whenever SP is given
+    if (sp.is_some() && rm.is_none()) || rm.is_some_and(|r| r != 0 && r != 1) {
+        return Err(runtime_err(
+            "error in ranking: PM must be in 0 or 1. (PM必须是0或1。)",
+        ));
+    }
+    if let (Some(r), Some(v)) = (rm, sp) {
+        if r == 0 && !(1.0..=2.0).contains(&v) {
+            return Err(runtime_err("error in ranking: SP must be in [1,2] when PM = 0. (当PM为0时，SP必须在[1,2]范围内，详见ranking帮助文档。)"));
+        }
+        if r == 1 && !(v >= 1.0 && v <= n as f64 - 2.0) {
+            return Err(runtime_err("error in ranking: SP must be in [1,Nind] when PM = 1, Nind is the number of individuals. (当PM为1时，SP必须在[1,Nind]范围内，Nind为种群规模，详见ranking帮助文档。)"));
+        }
+    }
     // position counted from the worst individual (0) to the best (n - 1)
     let pos: Vec<usize> = f
         .iter()
@@ -538,9 +610,19 @@ pub fn scaling<'py>(
     maxormins: Opt<'_, 'py>,
     smul: Option<f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let f = prepared_column(obj_v, cv, maxormins)?;
+    let f = prepared_column(
+        obj_v,
+        cv,
+        maxormins,
+        "error in scaling: ObjV must be a n*1 Numpy ndarray. (种群的目标函数值矩阵必须是n行1列的Numpy ndarray类型矩阵。)",
+    )?;
     let n = f.len();
     let smul = smul.unwrap_or(2.0);
+    if smul < 2.0 {
+        return Err(runtime_err(
+            "error in scaling: Smul must be or more than 2. (传入本函数的参数Smul必须不小于2。)",
+        ));
+    }
     let fmax = f.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let g: Vec<f64> = f.iter().map(|&x| fmax - x).collect();
     if n == 0 || g.iter().all(|&x| x == g[0]) {
@@ -571,8 +653,18 @@ pub fn powing<'py>(
     maxormins: Opt<'_, 'py>,
     k: Option<f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let f = prepared_column(obj_v, cv, maxormins)?;
+    let f = prepared_column(
+        obj_v,
+        cv,
+        maxormins,
+        "error in powing: ObjV must be an n*1 array.  (目标函数矩阵ObjV必须是n行1列的Numpy ndarray类型矩阵。)",
+    )?;
     let k = k.unwrap_or(1.0);
+    if k <= 0.0 {
+        return Err(runtime_err(
+            "error in powing: The k must be more than 0. (传入本函数的参数k必须大于0。)",
+        ));
+    }
     let (mn, mx) = f
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| {
@@ -596,8 +688,18 @@ pub fn indexing<'py>(
     maxormins: Opt<'_, 'py>,
     beta: Option<f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let f = prepared_column(obj_v, cv, maxormins)?;
+    let f = prepared_column(
+        obj_v,
+        cv,
+        maxormins,
+        "error in indexing: ObjV must be a n*1 Numpy ndarray. (目标函数矩阵ObjV必须是n行1列的Numpy ndarray类型矩阵。)",
+    )?;
     let beta = beta.unwrap_or(1.0);
+    if beta <= 0.0 {
+        return Err(runtime_err(
+            "error in indexing: Beta must be more than 0. (Beta必须大于0。)",
+        ));
+    }
     let (mn, mx) = f
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| {

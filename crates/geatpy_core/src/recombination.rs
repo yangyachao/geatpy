@@ -22,7 +22,7 @@ enum Pairing {
     Global(usize),
 }
 
-fn pairing(half_n: Opt, n: usize) -> PyResult<Pairing> {
+fn pairing(half_n: Opt, n: usize, name: &str) -> PyResult<Pairing> {
     match half_n {
         None => Ok(Pairing::Full),
         Some(o) if o.is_none() => Ok(Pairing::Full),
@@ -38,22 +38,68 @@ fn pairing(half_n: Opt, n: usize) -> PyResult<Pairing> {
                     Pairing::Full
                 });
             }
-            let k: f64 = o.extract()?;
-            if k <= 0.0 {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "error: Half_N must be a bool or a positive integer.",
-                ));
+            // a positive int (geatpy 2.7.0 rejects floats such as 3.0)
+            let k: f64 = if o.is_instance_of::<pyo3::types::PyFloat>() {
+                0.0
+            } else {
+                o.extract()?
+            };
+            if k < 1.0 || k.fract() != 0.0 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "error in {}: Half_N error. (传入参数Half_N有误，详见API文档。)",
+                    name
+                )));
             }
             Ok(Pairing::Global((k as usize).min(n)))
         }
     }
 }
 
-fn prob(obj: Opt, default: f64) -> PyResult<f64> {
-    match obj {
-        Some(o) if !o.is_none() => o.extract(),
-        _ => Ok(default),
+/// Crossover probability `XOVR` (or `RecOpt` for recint/reclin/recdis), which must lie in [0, 1].
+fn prob(obj: Opt, default: f64, name: &str) -> PyResult<f64> {
+    let p: f64 = match obj {
+        Some(o) if !o.is_none() => o.extract()?,
+        _ => default,
+    };
+    if !(0.0..=1.0).contains(&p) {
+        let msg = if matches!(name, "recint" | "reclin" | "recdis") {
+            "RecOpt must be in [0,1]. (重组概率RecOpt必须在[0, 1]之间。)"
+        } else {
+            "XOVR must be in [0,1]. (交叉概率XOVR必须在[0, 1]之间。)"
+        };
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in {}: {}",
+            name, msg
+        )));
     }
+    Ok(p)
+}
+
+/// Non-negative scalar or per-gene parameter (recsbx `n`, recndx `A`).
+fn non_negative(obj: Opt, l: usize, default: f64, op: &str, name: &str) -> PyResult<Vec<f64>> {
+    let v = crate::utils::per_gene(obj, l, default, name)?;
+    if v.iter().any(|&x| x < 0.0 || x.is_nan()) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in {}: {} must be or bigger than 0. (当输入参数{}为一个数时，它必须不小于0。)",
+            op, name, name
+        )));
+    }
+    Ok(v)
+}
+
+/// geatpy 2.7.0 checks that every row of a permutation chromosome holds distinct genes.
+fn check_permutation(chrom: &Array2<f64>, name: &str) -> PyResult<()> {
+    for row in chrom.rows() {
+        let mut v: Vec<f64> = row.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if v.windows(2).any(|w| w[0] == w[1]) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "error in {}: Chromosome error. (染色体不满足排列编码规则。)",
+                name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn random_pair<R: Rng>(n: usize, rng: &mut R) -> (usize, usize) {
@@ -163,6 +209,11 @@ fn copy_sources(op: CopyOp, n: usize, l: usize, pc: f64, mode: Pairing) -> Vec<V
     let mut rng = rand::thread_rng();
     let half = n / 2;
     match mode {
+        // Global uniform/discrete recombination: each (virtual) gene comes from a random individual
+        // of the whole population, and the probability is not used (geatpy 2.7.0 `*_gb`).
+        Pairing::Global(k) if matches!(op, CopyOp::Uniform | CopyOp::Discrete) => (0..k)
+            .map(|_| (0..l).map(|_| rng.gen_range(0..n)).collect())
+            .collect(),
         Pairing::Global(k) => (0..k)
             .map(|_| {
                 let (a, b) = random_pair(n, &mut rng);
@@ -227,6 +278,7 @@ fn gene_segments(gene_id: Opt, l: usize) -> PyResult<Option<(Vec<usize>, usize)>
 /// (in which case whole chromosomes are exchanged).
 fn copy_crossover<'py>(
     py: Python<'py>,
+    name: &str,
     op: CopyOp,
     old: &Bound<'py, PyAny>,
     pc: f64,
@@ -239,7 +291,7 @@ fn copy_crossover<'py>(
             .map(|m| Ok((to_f64_array2(&m)?, is_integer_like(&m))))
             .collect::<PyResult<_>>()?;
         let n = mats.first().map(|m| m.0.shape()[0]).unwrap_or(0);
-        let src = copy_sources(op, n, mats.len(), pc, pairing(half_n, n)?);
+        let src = copy_sources(op, n, mats.len(), pc, pairing(half_n, n, name)?);
         let out = PyList::empty(py);
         for (c, (m, as_int)) in mats.iter().enumerate() {
             let mut new = Array2::<f64>::zeros((src.len(), m.shape()[1]));
@@ -253,7 +305,7 @@ fn copy_crossover<'py>(
     let as_int = is_integer_like(old);
     let chrom = to_f64_array2(old)?;
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
-    let mode = pairing(half_n, n)?;
+    let mode = pairing(half_n, n, name)?;
     let (seg, virtual_len) = match gene_segments(gene_id, l)? {
         Some((s, k)) => (s, k),
         None => ((0..l).collect(), l),
@@ -282,11 +334,13 @@ macro_rules! copy_operator {
             parallel: Opt<'_, 'py>,
         ) -> PyResult<PyObject> {
             let _ = parallel;
+            let name = stringify!($name);
             copy_crossover(
                 py,
+                name,
                 $op,
                 old_chrom,
-                prob(xovr, $default_pc)?,
+                prob(xovr, $default_pc, name)?,
                 half_n,
                 gene_id,
             )
@@ -304,7 +358,7 @@ copy_operator!(
 copy_operator!(
     xovud,
     CopyOp::Uniform,
-    0.7,
+    0.5,
     "Uniform crossover: every gene is exchanged with probability XOVR."
 );
 copy_operator!(
@@ -346,9 +400,10 @@ pub fn recdis<'py>(
     let _ = parallel;
     copy_crossover(
         py,
+        "recdis",
         CopyOp::Discrete,
         old_chrom,
-        prob(rec_opt, 0.5)?,
+        prob(rec_opt, 0.5, "recdis")?,
         half_n,
         gene_id,
     )
@@ -358,6 +413,7 @@ pub fn recdis<'py>(
 /// `global(pa, pb, rng)` one gene of a global-mode offspring.
 fn real_recombination<'py, F, G>(
     py: Python<'py>,
+    name: &str,
     old: &Bound<'py, PyAny>,
     pc: f64,
     half_n: Opt,
@@ -372,7 +428,7 @@ where
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
     let half = n / 2;
     let mut rng = rand::thread_rng();
-    let out = match pairing(half_n, n)? {
+    let out = match pairing(half_n, n, name)? {
         Pairing::Global(k) => {
             let mut out = Array2::<f64>::zeros((k, l));
             for r in 0..k {
@@ -412,10 +468,6 @@ where
     chrom_out(py, out, false)
 }
 
-fn per_gene_vec(obj: Opt, l: usize, default: f64, name: &str) -> PyResult<Vec<f64>> {
-    crate::utils::per_gene(obj, l, default, name)
-}
-
 fn sbx_beta<R: Rng>(eta: f64, rng: &mut R) -> f64 {
     let u: f64 = rng.gen();
     let b = if u > 0.5 {
@@ -444,12 +496,13 @@ pub fn recsbx<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let l = to_f64_array2(old_chrom)?.shape()[1];
-    let eta = per_gene_vec(n, l, 20.0, "n")?;
+    let eta = non_negative(n, l, 20.0, "recsbx", "n")?;
     let eta2 = eta.clone();
     real_recombination(
         py,
+        "recsbx",
         old_chrom,
-        prob(xovr, 0.7)?,
+        prob(xovr, 0.7, "recsbx")?,
         half_n,
         move |_, p1, p2, rng| {
             let mut c1 = p1.to_vec();
@@ -480,13 +533,28 @@ enum Alpha {
     Matrix(Array2<f64>),
 }
 
-fn parse_alpha(alpha: Opt) -> PyResult<Alpha> {
+/// Alpha: a scalar or a matrix of factors, all in [-0.25, 1.25) as required by geatpy 2.7.0.
+fn parse_alpha(alpha: Opt, name: &str) -> PyResult<Alpha> {
+    let ok = |v: f64| (-0.25..1.25).contains(&v);
+    let illegal = || {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in {0}: The value of Alpha is illegal. (输入参数Alpha的值不合法，详见{0}帮助文档。)",
+            name
+        ))
+    };
     match alpha {
         Some(a) if !a.is_none() => {
             if let Ok(v) = a.extract::<f64>() {
+                if !ok(v) {
+                    return Err(illegal());
+                }
                 Ok(Alpha::Scalar(v))
             } else {
-                Ok(Alpha::Matrix(to_f64_array2(a)?))
+                let m = to_f64_array2(a)?;
+                if !m.iter().all(|&v| ok(v)) {
+                    return Err(illegal());
+                }
+                Ok(Alpha::Matrix(m))
             }
         }
         _ => Ok(Alpha::Random),
@@ -495,13 +563,14 @@ fn parse_alpha(alpha: Opt) -> PyResult<Alpha> {
 
 fn intermediate<'py>(
     py: Python<'py>,
+    name: &str,
     old: &Bound<'py, PyAny>,
     rec_opt: Opt,
     half_n: Opt,
     alpha: Opt,
     per_gene: bool,
 ) -> PyResult<PyObject> {
-    let alpha = parse_alpha(alpha)?;
+    let alpha = parse_alpha(alpha, name)?;
     let draw = |rng: &mut rand::rngs::ThreadRng| rng.gen::<f64>() * 1.5 - 0.25;
     let factor = |row: usize, j: usize, rng: &mut rand::rngs::ThreadRng, shared: f64| -> f64 {
         match &alpha {
@@ -520,8 +589,9 @@ fn intermediate<'py>(
     let half = chrom.shape()[0] / 2;
     real_recombination(
         py,
+        name,
         old,
-        prob(rec_opt, 0.7)?,
+        prob(rec_opt, 0.7, name)?,
         half_n,
         |i, p1, p2, rng| {
             let (s1, s2) = (draw(rng), draw(rng));
@@ -552,7 +622,7 @@ pub fn recint<'py>(
     parallel: Opt<'_, 'py>,
 ) -> PyResult<PyObject> {
     let _ = parallel;
-    intermediate(py, old_chrom, rec_opt, half_n, alpha, true)
+    intermediate(py, "recint", old_chrom, rec_opt, half_n, alpha, true)
 }
 
 /// Line recombination: like intermediate recombination with one factor a per offspring.
@@ -567,7 +637,7 @@ pub fn reclin<'py>(
     parallel: Opt<'_, 'py>,
 ) -> PyResult<PyObject> {
     let _ = parallel;
-    intermediate(py, old_chrom, rec_opt, half_n, alpha, false)
+    intermediate(py, "reclin", old_chrom, rec_opt, half_n, alpha, false)
 }
 
 fn standard_normal<R: Rng>(rng: &mut R) -> f64 {
@@ -588,7 +658,7 @@ pub fn recndx<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let l = to_f64_array2(old_chrom)?.shape()[1];
-    let aa = per_gene_vec(a, l, 1.4826, "A")?;
+    let aa = non_negative(a, l, 1.4826, "recndx", "A")?;
     let aa2 = aa.clone();
     let gene = |aj: f64, x: f64, y: f64, rng: &mut rand::rngs::ThreadRng| -> (f64, f64) {
         let mean = (x + y) * 0.5;
@@ -603,8 +673,9 @@ pub fn recndx<'py>(
     };
     real_recombination(
         py,
+        "recndx",
         old_chrom,
-        prob(xovr, 0.7)?,
+        prob(xovr, 0.7, "recndx")?,
         half_n,
         move |_, p1, p2, rng| {
             let mut c1 = p1.to_vec();
@@ -679,6 +750,7 @@ fn ox_pair(p1: &[f64], p2: &[f64], lo: usize, hi: usize) -> (Vec<f64>, Vec<f64>)
 /// global mode (Half_N a positive integer).
 fn permutation_crossover<'py, F>(
     py: Python<'py>,
+    name: &str,
     old: &Bound<'py, PyAny>,
     pc: f64,
     half_n: Opt,
@@ -690,6 +762,7 @@ where
 {
     let as_int = is_integer_like(old);
     let chrom = to_f64_array2(old)?;
+    check_permutation(&chrom, name)?;
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
     let half = n / 2;
     let mut rng = rand::thread_rng();
@@ -705,7 +778,7 @@ where
             op(a, b, global, rng)
         }
     };
-    let out = match pairing(half_n, n)? {
+    let out = match pairing(half_n, n, name)? {
         Pairing::Global(k) => {
             let mut out = Array2::<f64>::zeros((k, l));
             for r in 0..k {
@@ -761,9 +834,15 @@ pub fn xovpmx<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let method = crate::utils::opt_int(method, 1)?;
-    let pc = prob(xovr, 0.7)?;
+    if method != 1 && method != 2 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "error in xovpmx: Method must be 1 or 2. (传入参数Method必须是1或者2。)",
+        ));
+    }
+    let pc = prob(xovr, 0.7, "xovpmx")?;
     permutation_crossover(
         py,
+        "xovpmx",
         old_chrom,
         pc,
         half_n,
@@ -795,8 +874,9 @@ pub fn xovox<'py>(
     let _ = (parallel, params4);
     permutation_crossover(
         py,
+        "xovox",
         old_chrom,
-        prob(xovr, 0.7)?,
+        prob(xovr, 0.7, "xovox")?,
         half_n,
         true,
         |a, b, _, rng| {

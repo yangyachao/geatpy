@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 use rand::Rng;
 
-use crate::utils::{bounds, chrom_out, fix_value, is_integer_like, knob, opt_int, per_gene, Knob};
+use crate::utils::{bounds, chrom_out, fix_value, is_integer_like, knob, per_gene, Knob};
 
 type Opt<'a, 'py> = Option<&'a Bound<'py, PyAny>>;
 
@@ -18,8 +18,40 @@ fn require_ri(encoding: &str, name: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn default_pm(pm: Opt, d: usize) -> PyResult<Vec<f64>> {
-    per_gene(pm, d, 1.0 / (d.max(1) as f64), "Pm")
+fn err(msg: String) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(msg)
+}
+
+/// Pm as a scalar or a per-gene array, every value in [0, 1] (geatpy 2.7.0 messages).
+fn pm_vec(pm: Opt, d: usize, default: f64, name: &str) -> PyResult<Vec<f64>> {
+    let is_array = matches!(knob(pm)?, Some(Knob::Array(_)));
+    let v = per_gene(pm, d, default, "Pm")?;
+    if v.iter().any(|&x| !(0.0..=1.0).contains(&x)) {
+        return Err(err(if is_array {
+            format!(
+                "error in {}: Every element in Pm must be in [0, 1] if Pm is an array. (各变异概率Pm必须在[0, 1]之间。)",
+                name
+            )
+        } else {
+            format!(
+                "error in {}: Pm must be in [0, 1]. (变异概率Pm必须在[0, 1]之间。)",
+                name
+            )
+        }));
+    }
+    Ok(v)
+}
+
+fn default_pm(pm: Opt, d: usize, name: &str) -> PyResult<Vec<f64>> {
+    pm_vec(pm, d, 1.0 / (d.max(1) as f64), name)
+}
+
+/// A Python/numpy integer (geatpy 2.7.0 rejects floats such as 3.0 for integer arguments).
+fn int_value(o: &Bound<'_, PyAny>) -> Option<i64> {
+    if o.is_instance_of::<pyo3::types::PyFloat>() || o.is_instance_of::<pyo3::types::PyBool>() {
+        return None;
+    }
+    o.extract::<i64>().ok()
 }
 
 /// Polynomial mutation (Deb). Inputs are repaired first; the mutated value stays in range by construction.
@@ -54,7 +86,7 @@ pub fn mutpolyn<'py>(
     };
     let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
     let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
-    let pm = default_pm(pm, d)?;
+    let pm = default_pm(pm, d, "mutpolyn")?;
     let eta = per_gene(dis_i, d, 20.0, "DisI")?;
     let fix = crate::utils::fix_type(fix_type, "mutpolyn")?;
     let mut rng = rand::thread_rng();
@@ -112,7 +144,7 @@ pub fn mutgau<'py>(
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
     let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
-    let pm = default_pm(pm, d)?;
+    let pm = default_pm(pm, d, "mutgau")?;
     let fix = crate::utils::fix_type(fix_type, "mutgau")?;
     let middle = matches!(knob(middle)?, Some(Knob::Bool(true)));
     // None => per-gene sigma derived from bounds; Some(true) => adaptive; per-gene fixed sigma otherwise.
@@ -207,12 +239,35 @@ pub fn mutbga<'py>(
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
     let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
-    let pm = default_pm(pm, d)?;
+    let pm = default_pm(pm, d, "mutbga")?;
     let shrink = per_gene(mut_shrink, d, 0.5, "MutShrink")?;
-    let grad: Vec<i64> = per_gene(gradient, d, 20.0, "Gradient")?
-        .iter()
-        .map(|&g| g as i64)
-        .collect();
+    if shrink.iter().any(|&x| !(0.0..=1.0).contains(&x)) {
+        return Err(err(if matches!(knob(mut_shrink)?, Some(Knob::Array(_))) {
+            "error in mutbga: Every element of MutShrink must be or bigger than 0 if MutShrink is an array. (当输入参数MutShrink是一个Numpy ndarray一维数组时，它的各个元素必须在[0, 1]之间。)".to_string()
+        } else {
+            "error in mutbga: MutShrink must be in [0, 1]. (当输入参数MutShrink为一个数时，它必须在[0, 1]之间。)".to_string()
+        }));
+    }
+    // Gradient: a non-negative int, or an array of positive integers.
+    let grad: Vec<i64> = match gradient.filter(|g| !g.is_none()) {
+        None => vec![20; d],
+        Some(g) => match int_value(g) {
+            Some(v) if v < 0 => {
+                return Err(err("error in mutbga: Gradient must be or bigger than 0. (当输入参数Gradient为一个数时，它必须不小于0。)".to_string()))
+            }
+            Some(v) => vec![v; d],
+            None if g.hasattr("__len__")? => {
+                let v = per_gene(Some(g), d, 20.0, "Gradient")?;
+                if v.iter().any(|&x| x <= 0.0) {
+                    return Err(err("error in mutbga: Every element of Gradient must be or bigger than 0 if Gradient is an array. (当输入参数Gradient是一个Numpy ndarray一维数组时，它的各个元素必须不小于0。)".to_string()));
+                }
+                v.iter().map(|&x| x as i64).collect()
+            }
+            None => {
+                return Err(err("error in mutbga: The type of Gradient must be int or Numpy ndarray. (输入参数Gradient必须是int或者Numpy ndarray类型。)".to_string()))
+            }
+        },
+    };
     let fix = crate::utils::fix_type(fix_type, "mutbga")?;
     // The mutation range doubles as the repair span, as in the reference implementation.
     let range: Vec<f64> = (0..d).map(|j| b.span[j] * shrink[j]).collect();
@@ -265,7 +320,7 @@ pub fn mutuni<'py>(
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
     let b = bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
-    let pm = default_pm(pm, d)?;
+    let pm = default_pm(pm, d, "mutuni")?;
     let fix = crate::utils::fix_type(fix_type, "mutuni")?;
     let middle = matches!(knob(middle)?, Some(Knob::Bool(true)));
     let (adaptive, radius): (bool, Option<Vec<f64>>) = match knob(alpha)? {
@@ -348,7 +403,7 @@ pub fn mutbin<'py>(
     }
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
-    let pm = default_pm(pm, d)?;
+    let pm = default_pm(pm, d, "mutbin")?;
     let mut rng = rand::thread_rng();
     for i in 0..n {
         for j in 0..d {
@@ -464,27 +519,40 @@ pub fn mutde<'py>(
     }
 
     // F: scalar, [F1, F2] with None meaning "random in (0, 1) per individual", or None.
-    let parse_f = |o: &Bound<'py, PyAny>| -> PyResult<f64> {
+    let parse_f = |o: &Bound<'py, PyAny>| -> PyResult<Option<f64>> {
         if o.is_none() {
-            Ok(-1.0)
+            Ok(None)
         } else {
-            o.extract::<f64>()
+            Ok(Some(o.extract::<f64>()?))
         }
     };
-    let (f1, f2) = match f {
-        None => (-1.0, -1.0),
-        Some(o) if o.is_none() => (-1.0, -1.0),
+    let (fa_opt, fb_opt) = match f {
+        None => (None, None),
+        Some(o) if o.is_none() => (None, None),
         Some(o) => {
             if let Ok(v) = o.extract::<f64>() {
-                (v, v)
-            } else {
+                (Some(v), Some(v))
+            } else if o.is_instance_of::<pyo3::types::PyList>() || o.is_instance_of::<PyTuple>() {
                 let items: Vec<Bound<'py, PyAny>> = o.try_iter()?.collect::<PyResult<_>>()?;
-                let a = items.first().map(parse_f).transpose()?.unwrap_or(-1.0);
-                let c = items.get(1).map(parse_f).transpose()?.unwrap_or(a);
+                let a = items.first().map(parse_f).transpose()?.flatten();
+                let c = match items.get(1) {
+                    Some(x) => parse_f(x)?,
+                    None => a,
+                };
                 (a, c)
+            } else {
+                return Err(err("error in mutde: F must be a scalar or a list. (输入参数F必须是一个标量或者list列表。)".to_string()));
             }
         }
     };
+    if fa_opt.is_some_and(|x| x < 0.0) || fb_opt.is_some_and(|x| x < 0.0) {
+        return Err(err(
+            "error in mutde: All the F must be a bigger than 0. (所有的缩放因子F必须大于0。)"
+                .to_string(),
+        ));
+    }
+    // a negative value marks "draw F at random"
+    let (f1, f2) = (fa_opt.unwrap_or(-1.0), fb_opt.unwrap_or(-1.0));
 
     let mut rng = rand::thread_rng();
     // Trial values of row i on `cols`, with freshly drawn donors and F (the target row is excluded
@@ -528,6 +596,11 @@ pub fn mutde<'py>(
             .filter(|(_, &on)| on)
             .map(|((i, j), _)| trial(i, &[j], &mut rng)[0])
             .collect();
+        // int32 when every variable is an integer, like the matrix output
+        if !b.discrete.is_empty() && b.discrete.iter().all(|&x| x) {
+            let ints: Vec<i32> = vals.iter().map(|&x| x.round() as i32).collect();
+            return Ok(Array1::from(ints).into_pyarray(py).into_any().unbind());
+        }
         return Ok(Array1::from(vals).into_pyarray(py).into_any().unbind());
     }
     let all_cols: Vec<usize> = (0..d).collect();
@@ -557,20 +630,52 @@ fn segment_len<R: Rng>(l: usize, max_len: usize, lo: usize, rng: &mut R) -> usiz
     max_len
 }
 
-/// Parses InvertLen / MoveLen: int => maximum length, [k] => fixed length, None => default.
-fn parse_len(obj: Opt, default: usize) -> PyResult<(usize, bool)> {
-    match obj {
-        None => Ok((default, false)),
-        Some(o) if o.is_none() => Ok((default, false)),
-        Some(o) => {
-            if let Ok(v) = o.extract::<f64>() {
-                Ok((v as usize, false))
-            } else {
-                let v: Vec<f64> = o.extract()?;
-                Ok((v.first().copied().unwrap_or(default as f64) as usize, true))
-            }
+/// Parses InvertLen / MoveLen: int => maximum length, [k] => fixed length, None => default. Both forms
+/// must hold an integer of at least `min` (geatpy 2.7.0 checks and messages).
+fn parse_len(obj: Opt, default: usize, op: &str, arg: &str, min: i64) -> PyResult<(usize, bool)> {
+    let Some(o) = obj.filter(|o| !o.is_none()) else {
+        return Ok((default, false));
+    };
+    if let Some(v) = int_value(o) {
+        if v < min {
+            return Err(err(format!(
+                "error in {0}: When {1} is a scalar, it must be a integer bigger than {2}. (当{1}是一个标量时，它必须是大于{2}的整数。)",
+                op, arg, min - 1
+            )));
         }
+        return Ok((v as usize, false));
     }
+    if let Ok(list) = o.downcast::<pyo3::types::PyList>() {
+        let k = if list.len() == 1 {
+            int_value(&list.get_item(0)?)
+        } else {
+            None
+        };
+        return match k {
+            Some(k) if k >= min => Ok((k as usize, true)),
+            _ => Err(err(format!(
+                "error in {0}: When {1} is a list, it must have only one element which is a integer that bigger than {2}. (当{1}是个list列表时，它必须只包含一个元素且该元素是个大于{2}的整数。)",
+                op, arg, min - 1
+            ))),
+        };
+    }
+    Err(err(format!(
+        "error in {0}: {1} illegal. (输入参数{1}不合法，详见help({0})帮助文档。)",
+        op, arg
+    )))
+}
+
+/// Permutation chromosomes shorter than 2 genes are returned unchanged, in their own dtype.
+fn short_permutation<'py>(
+    encoding: &str,
+    old: &Bound<'py, PyAny>,
+    l: usize,
+) -> PyResult<Option<PyObject>> {
+    if encoding == "P" && l < 2 {
+        let np = old.py().import("numpy")?;
+        return Ok(Some(np.call_method1("array", (old,))?.unbind()));
+    }
+    Ok(None)
 }
 
 /// "Random repair" of the order mutations on 'RI' chromosomes (geatpy 2.7.0 semantics): every gene is
@@ -646,8 +751,11 @@ pub fn mutinv<'py>(
     let as_int = is_integer_like(old_chrom);
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
-    let pm = crate::utils::per_gene(pm, 1, 1.0, "Pm")?[0];
-    let (len, fixed) = parse_len(invert_len, l)?;
+    let pm = pm_vec(pm, 1, 1.0, "mutinv")?[0];
+    let (len, fixed) = parse_len(invert_len, l, "mutinv", "InvertLen", 2)?;
+    if let Some(out) = short_permutation(encoding, old_chrom, l)? {
+        return Ok(out);
+    }
     let len = len.min(l);
     let mut rng = rand::thread_rng();
     if l >= 2 {
@@ -656,7 +764,7 @@ pub fn mutinv<'py>(
                 continue;
             }
             let k = if fixed {
-                len.max(1)
+                len.max(2)
             } else {
                 segment_len(l, len, 2, &mut rng)
             };
@@ -696,9 +804,17 @@ pub fn mutmove<'py>(
     let as_int = is_integer_like(old_chrom);
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
-    let pm = crate::utils::per_gene(pm, 1, 1.0, "Pm")?[0];
+    let pm = pm_vec(pm, 1, 1.0, "mutmove")?[0];
     let pr = crate::utils::per_gene(pr, 1, 0.0, "Pr")?[0];
-    let (len, fixed) = parse_len(move_len, l)?;
+    crate::utils::check_prob(
+        pr,
+        "mutmove",
+        "Pr must be in [0, 1]. (逆转概率Pr必须在[0, 1]之间。)",
+    )?;
+    let (len, fixed) = parse_len(move_len, l, "mutmove", "MoveLen", 1)?;
+    if let Some(out) = short_permutation(encoding, old_chrom, l)? {
+        return Ok(out);
+    }
     let len = len.min(l.saturating_sub(1)).max(1);
     let mut rng = rand::thread_rng();
     if l >= 2 {
@@ -755,7 +871,11 @@ pub fn mutswap<'py>(
     let as_int = is_integer_like(old_chrom);
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
+    // geatpy 2.7.0 does not range-check Pm here
     let pm = crate::utils::per_gene(pm, 1, 1.0, "Pm")?[0];
+    if let Some(out) = short_permutation(encoding, old_chrom, l)? {
+        return Ok(out);
+    }
     let mut rng = rand::thread_rng();
     if l >= 2 {
         for i in 0..n {
@@ -799,6 +919,15 @@ pub fn mutpp<'py>(
     let as_int = is_integer_like(old_chrom);
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
+    for row in chrom.rows() {
+        let mut v = row.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if v.windows(2).any(|w| w[0] == w[1]) {
+            return Err(err(
+                "error in mutpp: Chromosome error. (染色体不满足排列编码规则。)".to_string(),
+            ));
+        }
+    }
     let (lo, hi) = match field_dr {
         Some(f) if !f.is_none() => {
             let a = crate::utils::to_f64_array2(f)?;
@@ -811,8 +940,19 @@ pub fn mutpp<'py>(
         }
     };
     let range = (hi - lo + 1).max(1) as usize;
-    let pm = crate::utils::per_gene(pm, 1, 1.0 / l.max(1) as f64, "Pm")?[0];
-    let times = (opt_int(mut_n, 1)?.max(0) as usize).min(l);
+    let pm = pm_vec(pm, 1, 1.0 / l.max(1) as f64, "mutpp")?[0];
+    let times = match mut_n.filter(|m| !m.is_none()) {
+        None => 1,
+        Some(m) => match int_value(m) {
+            Some(k) if k > 0 => (k as usize).min(l),
+            _ => {
+                return Err(err(
+                    "error in mutpp: MutN must be an integer bigger than 0. (传入参数MutN必须是正整数。)"
+                        .to_string(),
+                ))
+            }
+        },
+    };
     let mut rng = rand::thread_rng();
     if l >= 1 && range >= 2 {
         for i in 0..n {

@@ -45,8 +45,8 @@ def test_selection_operators():
     sel = ea.selecting('tour', fitn_v, 4)
     assert len(sel) == 4
 
-    # ranking
-    obj_v = np.array([10.0, 2.0, 5.0])
+    # ranking (geatpy 2.7.0 only accepts an n*1 ObjV)
+    obj_v = np.array([[10.0], [2.0], [5.0]])
     ranks = ea.ranking(obj_v)
     assert ranks.shape == (3, 1)
     # smaller obj_v (index 1) should have highest rank

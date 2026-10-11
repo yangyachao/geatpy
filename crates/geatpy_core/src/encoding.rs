@@ -152,7 +152,7 @@ struct FieldD {
     discrete: Vec<bool>,
 }
 
-fn parse_field_d(obj: &Bound<'_, PyAny>, lind: Option<usize>) -> PyResult<FieldD> {
+fn parse_field_d(obj: &Bound<'_, PyAny>, lind: Option<usize>, name: &str) -> PyResult<FieldD> {
     let f = crate::utils::to_f64_array2(obj)?;
     if f.shape()[0] < 8 {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -160,6 +160,14 @@ fn parse_field_d(obj: &Bound<'_, PyAny>, lind: Option<usize>) -> PyResult<FieldD
         ));
     }
     let d = f.shape()[1];
+    // Code lengths are limited to 31 bits (geatpy 2.7.0 `checkLen`), which also keeps every
+    // decoded integer within int32.
+    if (0..d).any(|j| f[[0, j]] > 31.0) {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "error in {}: The elements of the first row of FieldD should not be bigger than 31. (FieldD的第一行的元素不能超过31。)",
+            name
+        )));
+    }
     let fd = FieldD {
         lens: (0..d).map(|j| f[[0, j]] as usize).collect(),
         lb: f.row(1).to_vec(),
@@ -208,9 +216,14 @@ fn decode_bg<'py>(
     field: &Bound<'py, PyAny>,
     mode: Decode,
 ) -> PyResult<PyObject> {
+    let name = match mode {
+        Decode::Mixed => "bs2ri",
+        Decode::Real => "bs2real",
+        Decode::Int => "bs2int",
+    };
     let c = crate::utils::to_f64_array2(chrom)?;
     let (n, lind) = (c.shape()[0], c.shape()[1]);
-    let f = parse_field_d(field, Some(lind))?;
+    let f = parse_field_d(field, Some(lind), name)?;
     let d = f.lens.len();
     let mut phen = Array2::<f64>::zeros((n, d));
     for i in 0..n {
@@ -291,7 +304,7 @@ pub fn ri2bs<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let p = crate::utils::to_f64_array2(phen)?;
-    let f = parse_field_d(field_d, None)?;
+    let f = parse_field_d(field_d, None, "ri2bs")?;
     let (n, d) = (p.shape()[0], f.lens.len());
     if p.shape()[1] != d {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -362,19 +375,43 @@ pub fn boundfix<'py>(
     crate::utils::ri_out(py, chrom, &b.discrete)
 }
 
-/// Random binary population (int64 matrix of 0/1).
+/// A positive integer argument (Nind, Lind); geatpy 2.7.0 rejects 0, negatives and floats.
+fn positive_int(obj: &Bound<'_, PyAny>, msg: &str) -> PyResult<usize> {
+    let err = || pyo3::exceptions::PyRuntimeError::new_err(msg.to_string());
+    if obj.is_instance_of::<pyo3::types::PyFloat>() || obj.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(err());
+    }
+    match obj.extract::<i64>() {
+        Ok(v) if v > 0 => Ok(v as usize),
+        _ => Err(err()),
+    }
+}
+
+/// Random binary population: an int64 matrix of 0/1 (geatpy 2.7.0 uses np.random.randint here).
 #[pyfunction]
 #[pyo3(signature = (nind, lind, params2=None))]
 pub fn crtbp<'py>(
     py: Python<'py>,
-    nind: usize,
-    lind: usize,
+    nind: &Bound<'py, PyAny>,
+    lind: &Bound<'py, PyAny>,
     params2: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<PyObject> {
     let _ = params2;
+    let nind = positive_int(
+        nind,
+        "error in crtbp: Nind must be a int number > 0. (种群个体数Nind必须是大于0的int类型数。)",
+    )?;
+    let lind = positive_int(
+        lind,
+        "error in crtbp: Lind must be a int number > 0. (染色体长度Lind必须是大于0的int类型数。)",
+    )?;
+    Ok(random_bits(py, nind, lind))
+}
+
+fn random_bits(py: Python<'_>, nind: usize, lind: usize) -> PyObject {
     let mut rng = rand::thread_rng();
-    let chrom = Array2::from_shape_fn((nind, lind), |_| if rng.gen::<bool>() { 1.0 } else { 0.0 });
-    crate::utils::chrom_out(py, chrom, true)
+    let chrom = Array2::from_shape_fn((nind, lind), |_| rng.gen_range(0..2i64));
+    chrom.into_pyarray(py).into_any().unbind()
 }
 
 /// FieldDR bounds (validated); `discrete` honours the varTypes row.
@@ -521,7 +558,7 @@ pub fn crtpc<'py>(
                 ));
             }
             let lind = f.row(0).iter().sum::<f64>().round() as usize;
-            crtbp(py, nind, lind, None)
+            Ok(random_bits(py, nind, lind))
         }
         "RI" => crtri(py, nind, field, parallel),
         "P" => crtpp(py, nind, field, parallel),
