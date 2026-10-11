@@ -18,7 +18,7 @@
 ## 一、本地开发与构建
 
 ### 1. 前置依赖
-- **Python**: `>= 3.8` (支持 Python 3.8 ~ 3.14+)
+- **Python**: `>= 3.8` (支持 Python 3.8 ~ 3.15)
 - **Rust**: 安装 `cargo` 与 `rustc` (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
 - **Maturin**: `pip install maturin>=1.5`
 
@@ -73,7 +73,7 @@ pip install .
 - `dist/geatpy-2.7.0-cp38-abi3-<platform>_<arch>.whl`：针对该操作系统的二进制 Wheel。
 - `dist/geatpy-2.7.0.tar.gz`：通用的源码分发包 (sdist)。
 
-> **特性说明**：由于开启了 Python **abi3-py38** 特性，编译出的单个二进制 Wheel 可直接在 **Python 3.8、3.9、3.10、3.11、3.12、3.13、3.14+** 下直接加载运行，无需针对每个 Python 小版本分别编译。
+> **特性说明**：由于开启了 Python **abi3-py38** 特性，编译出的单个二进制 Wheel 可直接在 **Python 3.8、3.9、3.10、3.11、3.12、3.13、3.14、3.15** 下直接加载运行，无需针对每个 Python 小版本分别编译。
 
 发布到 PyPI：
 ```bash
@@ -87,7 +87,7 @@ twine upload dist/*
 
 项目配置了完整的自动化构建流程：
 1. **持续集成 ([`.github/workflows/ci.yml`](file:///home/kaiquan/kaiquan/geatpy/.github/workflows/ci.yml))**：
-   - 每次 Push 或 PR 时，在 Ubuntu、macOS、Windows 三大系统并发测试 Python 3.8 至 3.14。
+   - 每次 Push 或 PR 时，在 Ubuntu、macOS、Windows 三大系统并发测试 Python 3.8 至 3.15。
 2. **多平台发布流水线 ([`.github/workflows/release.yml`](file:///home/kaiquan/kaiquan/geatpy/.github/workflows/release.yml))**：
    - 当向仓库推送标签（如 `git push origin v2.7.0`）时自动启动。
    - 自动化跨平台编译构建：
