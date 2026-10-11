@@ -47,6 +47,9 @@ Issues = "https://github.com/yangyachao/geatpy/issues"
 manifest-path = "crates/geatpy_core/Cargo.toml"
 module-name = "_geatpy_core"
 python-packages = ["geatpy"]
+# The crate lives in crates/geatpy_core, so the root LICENSE (declared as License-File in the
+# metadata) has to be added to the sdist explicitly; PyPI rejects an sdist without it.
+include = [{ path = "LICENSE", format = "sdist" }]
 
 [tool.commitizen]
 name = "cz_conventional_commits"

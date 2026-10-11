@@ -247,7 +247,9 @@ def random_stats(ea):
     s['recdis_default_changed'] = (lambda: ch(ea.Recdis().do(P), P), 0.03)
     s['recndx_delta'] = (lambda: dl(ea.Recndx().do(P), P), 0.02)
     s['xovpmx_valid'] = (lambda: perm_ok(ea.Xovpmx(XOVR=1).do(PERM)), 0.0)
-    s['xovpmx_changed'] = (lambda: ch(ea.Xovpmx(XOVR=1).do(PERM), PERM), 0.05)
+    s['xovpmx_changed'] = (lambda: ch(ea.Xovpmx(XOVR=1).do(PERM), PERM), 0.02)
+    s['xovpmx_m2_changed'] = (lambda: ch(ea.Xovpmx(XOVR=0.7, Method=2).do(PERM), PERM), 0.02)
+    s['xovpmx_m2_low_changed'] = (lambda: ch(ea.Xovpmx(XOVR=0.3, Method=2).do(PERM), PERM), 0.02)
     s['xovox_valid'] = (lambda: perm_ok(ea.Xovox(XOVR=1).do(PERM)), 0.0)
     s['xovox_changed'] = (lambda: ch(ea.Xovox(XOVR=1).do(PERM), PERM), 0.05)
     s['mutpolyn_pm01_changed'] = (lambda: ch(ea.Mutpolyn(Pm=0.1).do('RI', P, F), P), 0.02)
@@ -348,6 +350,11 @@ def decode(e):
     if 'data' in e:
         return np.array([float(x) for x in e['data']], dtype=float).reshape(e['shape'])
     return e['repr']
+
+
+def run_stat(f, reps):
+    """Mean of a random-operator statistic over `reps` independent runs (cuts sampling noise)."""
+    return run_case(lambda: float(np.mean([float(f()) for _ in range(reps)])))
 
 
 def run_case(f):

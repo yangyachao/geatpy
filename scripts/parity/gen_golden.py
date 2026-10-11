@@ -27,7 +27,7 @@ def main():
     for name, f in pc.deterministic_cases(ea).items():
         res['deterministic'][name] = pc.run_case(f)
     for name, (f, tol) in pc.random_stats(ea).items():
-        r = pc.run_case(f)
+        r = pc.run_stat(f, 10)
         r['tol'] = tol
         res['random'][name] = r
     if '--skip-templates' not in sys.argv:

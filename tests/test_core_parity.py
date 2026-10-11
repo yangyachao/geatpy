@@ -58,7 +58,7 @@ def test_random_operator_statistics(name):
     if golden['status'] != 'ok':
         pytest.skip('original core rejects this input: ' + golden['error'])
     f, tol = RND[name]
-    got = pc.run_case(f)
+    got = pc.run_stat(f, 5)
     assert got['status'] == 'ok', got.get('error')
     expected = float(pc.decode(golden['value']))
     actual = float(pc.decode(got['value']))

@@ -634,7 +634,9 @@ fn distinct_cuts<R: Rng>(l: usize, rng: &mut R) -> (usize, usize) {
     (a.min(b), a.max(b))
 }
 
-/// Swap-based PMX on the positions where `take` is true; both offspring stay permutations.
+/// PMX on the positions where `take` is true, in geatpy 2.7.0's sequential form: at every crossing
+/// position the two offspring exchange their *current* genes, and each offspring swaps the incoming
+/// gene with the position that held it. Both offspring stay permutations.
 fn pmx_pair(p1: &[f64], p2: &[f64], take: &[bool]) -> (Vec<f64>, Vec<f64>) {
     let mut c1 = p1.to_vec();
     let mut c2 = p2.to_vec();
@@ -642,7 +644,7 @@ fn pmx_pair(p1: &[f64], p2: &[f64], take: &[bool]) -> (Vec<f64>, Vec<f64>) {
         if !t {
             continue;
         }
-        let (v1, v2) = (p1[k], p2[k]);
+        let (v1, v2) = (c1[k], c2[k]);
         if let Some(pos) = c1.iter().position(|&x| x == v2) {
             c1.swap(k, pos);
         }
@@ -672,15 +674,19 @@ fn ox_pair(p1: &[f64], p2: &[f64], lo: usize, hi: usize) -> (Vec<f64>, Vec<f64>)
     (fill(p1, p2), fill(p2, p1))
 }
 
+/// Pairs parents like the other crossovers. With `pair_gate` a pair crosses with probability `pc`;
+/// without it the operator always runs and handles `pc` itself. `op` is told whether it runs in
+/// global mode (Half_N a positive integer).
 fn permutation_crossover<'py, F>(
     py: Python<'py>,
     old: &Bound<'py, PyAny>,
     pc: f64,
     half_n: Opt,
+    pair_gate: bool,
     mut op: F,
 ) -> PyResult<PyObject>
 where
-    F: FnMut(&[f64], &[f64], &mut rand::rngs::ThreadRng) -> (Vec<f64>, Vec<f64>),
+    F: FnMut(&[f64], &[f64], bool, &mut rand::rngs::ThreadRng) -> (Vec<f64>, Vec<f64>),
 {
     let as_int = is_integer_like(old);
     let chrom = to_f64_array2(old)?;
@@ -689,13 +695,14 @@ where
     let mut rng = rand::thread_rng();
     let cross = |a: &[f64],
                  b: &[f64],
+                 global: bool,
                  rng: &mut rand::rngs::ThreadRng,
                  op: &mut F|
      -> (Vec<f64>, Vec<f64>) {
         if l < 2 {
             (b.to_vec(), a.to_vec())
         } else {
-            op(a, b, rng)
+            op(a, b, global, rng)
         }
     };
     let out = match pairing(half_n, n)? {
@@ -706,6 +713,7 @@ where
                 let (c, _) = cross(
                     &chrom.row(a).to_vec(),
                     &chrom.row(b).to_vec(),
+                    true,
                     &mut rng,
                     &mut op,
                 );
@@ -722,8 +730,8 @@ where
             };
             for i in 0..half {
                 let (p1, p2) = (chrom.row(i).to_vec(), chrom.row(i + half).to_vec());
-                let (c1, c2) = if rng.gen::<f64>() < pc {
-                    cross(&p1, &p2, &mut rng, &mut op)
+                let (c1, c2) = if !pair_gate || rng.gen::<f64>() < pc {
+                    cross(&p1, &p2, false, &mut rng, &mut op)
                 } else {
                     (p1, p2)
                 };
@@ -739,7 +747,8 @@ where
     chrom_out(py, out, as_int)
 }
 
-/// Partially mapped crossover (Method 1: two-point section, 2: uniform positions).
+/// Partially mapped crossover. Method 1: a pair crosses with probability XOVR on a two-point section;
+/// Method 2 (uniform PMX): every position crosses with probability XOVR (all positions in global mode).
 #[pyfunction]
 #[pyo3(signature = (old_chrom, xovr=None, half_n=None, method=None, parallel=None))]
 pub fn xovpmx<'py>(
@@ -752,16 +761,24 @@ pub fn xovpmx<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let method = crate::utils::opt_int(method, 1)?;
-    permutation_crossover(py, old_chrom, prob(xovr, 0.7)?, half_n, move |a, b, rng| {
-        let l = a.len();
-        let take: Vec<bool> = if method == 2 {
-            (0..l).map(|_| rng.gen::<f64>() < 0.5).collect()
-        } else {
-            let (lo, hi) = distinct_cuts(l, rng);
-            (0..l).map(|j| j >= lo && j <= hi).collect()
-        };
-        pmx_pair(a, b, &take)
-    })
+    let pc = prob(xovr, 0.7)?;
+    permutation_crossover(
+        py,
+        old_chrom,
+        pc,
+        half_n,
+        method != 2,
+        move |a, b, global, rng| {
+            let l = a.len();
+            let take: Vec<bool> = if method == 2 {
+                (0..l).map(|_| global || rng.gen::<f64>() < pc).collect()
+            } else {
+                let (lo, hi) = distinct_cuts(l, rng);
+                (0..l).map(|j| j >= lo && j <= hi).collect()
+            };
+            pmx_pair(a, b, &take)
+        },
+    )
 }
 
 /// Order crossover (OX) for permutations.
@@ -776,10 +793,17 @@ pub fn xovox<'py>(
     params4: Opt<'_, 'py>,
 ) -> PyResult<PyObject> {
     let _ = (parallel, params4);
-    permutation_crossover(py, old_chrom, prob(xovr, 0.7)?, half_n, |a, b, rng| {
-        let (lo, hi) = distinct_cuts(a.len(), rng);
-        ox_pair(a, b, lo, hi)
-    })
+    permutation_crossover(
+        py,
+        old_chrom,
+        prob(xovr, 0.7)?,
+        half_n,
+        true,
+        |a, b, _, rng| {
+            let (lo, hi) = distinct_cuts(a.len(), rng);
+            ox_pair(a, b, lo, hi)
+        },
+    )
 }
 
 /// Dispatcher kept for API compatibility: recombin(REC_F, OldChrom, ...) forwards the remaining
