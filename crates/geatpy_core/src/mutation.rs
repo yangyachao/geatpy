@@ -479,7 +479,7 @@ pub fn mutde<'py>(
                 (v, v)
             } else {
                 let items: Vec<Bound<'py, PyAny>> = o.try_iter()?.collect::<PyResult<_>>()?;
-                let a = items.first().map(&parse_f).transpose()?.unwrap_or(-1.0);
+                let a = items.first().map(parse_f).transpose()?.unwrap_or(-1.0);
                 let c = items.get(1).map(parse_f).transpose()?.unwrap_or(a);
                 (a, c)
             }

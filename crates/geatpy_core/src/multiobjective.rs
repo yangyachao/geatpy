@@ -43,28 +43,16 @@ fn ndsort_wrapper<'py>(
 
     if let Some(kw) = kwargs {
         for (k, v) in kw.iter() {
+            // An explicit None keeps the default, like an omitted argument.
+            if v.is_none() {
+                continue;
+            }
             let key = k.extract::<String>()?;
             match key.to_lowercase().as_str() {
-                "needsort" | "need_sort" | "neednum" | "need_num" => {
-                    if !v.is_none() {
-                        need_sort = v.extract().ok();
-                    }
-                }
-                "needlevel" | "need_level" => {
-                    if !v.is_none() {
-                        need_level = v.extract().ok();
-                    }
-                }
-                "cv" => {
-                    if !v.is_none() {
-                        cv_any = Some(v);
-                    }
-                }
-                "maxormins" => {
-                    if !v.is_none() {
-                        maxormins_any = Some(v);
-                    }
-                }
+                "needsort" | "need_sort" | "neednum" | "need_num" => need_sort = v.extract().ok(),
+                "needlevel" | "need_level" => need_level = v.extract().ok(),
+                "cv" => cv_any = Some(v),
+                "maxormins" => maxormins_any = Some(v),
                 _ => {}
             }
         }
