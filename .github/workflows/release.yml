@@ -82,6 +82,10 @@ jobs:
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    # PyPI trusted publisher: owner yangyachao, repository geatpy, workflow release.yml, environment pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/project/geatpy-rs/
     steps:
       - uses: actions/checkout@v4
 
