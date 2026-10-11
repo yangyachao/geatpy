@@ -3,7 +3,7 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 
 [![CI](https://github.com/yangyachao/geatpy/actions/workflows/ci.yml/badge.svg)](https://github.com/yangyachao/geatpy/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/yangyachao/geatpy?color=blue&logo=github)](https://github.com/yangyachao/geatpy/releases)
-[![Python Version](https://img.shields.io/badge/python-3.8_~_3.15-blue.svg?logo=python&logoColor=white)](https://pypi.org/project/geatpy/)
+[![Python Version](https://img.shields.io/badge/python-3.8_~_3.15-blue.svg?logo=python&logoColor=white)](https://pypi.org/project/geatpy-rs/)
 [![Rust](https://img.shields.io/badge/rust-PyO3_abi3-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-LGPL--3.0-green.svg)](LICENSE)
 
@@ -18,12 +18,13 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 - **开源致谢**: 衷心感谢原作者团队在进化计算领域的杰出贡献与算法设计奠基。
 
 ### 为什么发起这个重构版本？(Motivation)
-原版 Geatpy 长期基于特定版本的 C/C++ 动态链接库，在现代开发环境中面临诸多痛点：
-1. **高版本 Python 无法安装**: 官方二进制包仅支持至 Python 3.10，在 Python 3.11、3.12、3.13、3.14 及最新 3.15 上由于 C API 变动无法编译或运行。
-2. **跨平台支持弱**: 缺乏对现代化 macOS (Apple Silicon M1/M2/M3/M4 ARM64) 和 Linux ARM64 的预编译 Wheel 支持。
-3. **C 内核维护门槛高**: C 扩展缺乏现代包管理机制，在各操作系统本地编译时容易遇到编译链缺失与字符集编码异常。
+原版 Geatpy 的内核只以预编译二进制分发，在现代开发与生产环境中面临三个痛点：
+1. **高版本 Python 无法安装**: 原版只发布到 Python 3.10 的预编译轮子。在 Python 3.11 ~ 3.15 上 pip 找不到匹配的轮子，只能退回源码构建，而原版内核并不随源码公开，基本无法安装。
+2. **ARM 平台覆盖不全**: 原版的 Apple Silicon 轮子只覆盖 Python 3.8 ~ 3.10，且没有 Linux ARM64 (aarch64) 轮子，在 ARM 云服务器、树莓派与 Docker 容器里装不上。
+3. **二进制内核难排错**: 长度为 1 的染色体、一维输入等边界情况会直接段错误，整个 Python 进程退出；还有多处行为与其自身文档不符。
 
-针对以上行业痛点，**本项目使用 Rust (PyO3 + abi3) 对底层核心库进行了 100% 全量重写**，实现了全平台预编译二进制轮子与全版本 Python 开箱即用。
+为此，**本项目用 Rust (PyO3 + abi3) 重写了全部 74 个内核算子**，Python 层（算法模板、`Problem`、`Population` 等）原样保留，
+提供 Python 3.8 ~ 3.15 通用的全平台预编译 Wheel。
 
 ---
 
@@ -31,13 +32,13 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 
 | 特性维度 | 原官方版本 (Geatpy) | 本版本 (Geatpy Rust Core Edition) |
 | :--- | :--- | :--- |
-| **底层核心实现** | 早期 C/C++ 动态库 (部分二进制分发) | **100% 现代纯 Rust 原生实现** (`crates/geatpy_core`) |
+| **底层核心实现** | 编译好的二进制扩展，内核源码未公开 | **纯 Rust 原生实现** (`crates/geatpy_core`)，源码公开 |
 | **Python 版本支持** | 仅支持 Python 3.5 ~ 3.10 | **Python 3.8 ~ 3.15 全覆盖支持** |
-| **ABI 兼容性** | 每个 Python 版本需分别单独编译 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
-| **跨平台预编译** | Windows x64, Linux x64 (Mac 支持有限) | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
-| **代码与内存安全** | 存在原生裸指针与越界崩溃风险 | **纯安全 Rust（无 `unsafe`），非法输入抛出 Python 异常而非段错误** |
+| **ABI 兼容性** | 每个 Python 小版本单独构建 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
+| **跨平台预编译** | Windows x86/x64、Linux x86_64、macOS（Apple Silicon 仅 Python 3.8 ~ 3.10），无 Linux ARM64 | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
+| **代码与内存安全** | 边界输入可能触发段错误，导致 Python 进程退出 | **纯安全 Rust（无 `unsafe`），非法输入抛出 Python 异常而非段错误** |
 | **多核并行与性能** | C OpenMP 并行 | 当前为单线程实现；`Parallel` 参数为兼容保留，暂不生效 |
-| **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
+| **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与 42 个算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
 
 ---
 
@@ -50,7 +51,7 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
 - **确定性算子**（非支配排序、拥挤距离、编码解码、适应度分配、参考点、指标、NSGA-III/RVEA 环境选择等）逐值比对；
 - **随机算子**（交叉、变异、选择）按统计特征比对；
 - **算法模板**（39 个单/多目标模板）比对最终解质量：`GEATPY_PARITY_TEMPLATES=1 pytest tests/test_core_parity.py`；
-- **逐模块复核**（`tests/test_core_parity_review.py`）：对全部 75 个模块逐一核对，补齐了返回类型
+- **逐模块复核**（`tests/test_core_parity_review.py`）：对全部内核算子逐一核对，补齐了返回类型
   （全整数变量时返回 `int32`）、参数校验、`crtidp` 约束处理等细节，期望值均取自官方二进制的实际输出；
 - **随机差分与交叉审查**（`tests/test_core_parity_review2.py`、`scripts/parity/fuzz/`）：约 1500 个随机形状、参数组合与
   边界值用例同时在官方二进制与 Rust 内核上运行，逐项比对数值、dtype、返回结构与报错，随机算子比对统计分布；
@@ -161,15 +162,14 @@ if __name__ == '__main__':
 
 ## 📊 架构设计与底层算子覆盖
 
-Rust 核心库位于 `crates/geatpy_core/`，涵盖了进化算法全套 70+ 个底层算子：
+Rust 内核位于 `crates/geatpy_core/`，导出 74 个算子，名称与原版一致：
 
-- **编码映射 (`encoding.rs`)**: `bin2dec`, `bin2gray`, `gray2bin`, `dec2bin`, `crtip`, `crtrp`, `crtbp`, `crtup`, `crtsr`...
-- **选择算子 (`selection.rs`)**: `tour`, `rws`, `sus`, `etour`, `urs`, `recsrr`, `rwGA`, `awGA`...
-- **交叉与重组 (`recombination.rs`)**: `xovsp`, `xovdp`, `xovmp`, `xovsh`, `xovdp_templet`, `recdis`, `recint`, `reclin`, `recmut`, `rechex`...
-- **变异算子 (`mutation.rs`)**: `mutbin`, `mutbga`, `mutgau`, `mutmar`, `mutpol`, `mutuni`, `mutswap`, `mutmove`, `mutinv`...
-- **多目标排序与小生境 (`multiobjective.rs`)**: 非支配快速排序 (`NDSort`), 拥挤距离计算 (`crowddis`), 基于参考点的临界前沿关联选择 (`refselect`)...
-- **性能评估与指标 (`indicator.rs`)**: 世代距离 (`gd`), 反世代距离 (`igd`), 超体积指标 (`hv`), 距离测度矩阵 (`cdist`)...
-- **子种群迁移 (`utils.rs`)**: 环形、中心、全联通拓扑结构种群迁移算子 (`migrate`)。
+- **编码与种群初始化 (`encoding.rs`)**: `crtfld`, `crtbp`, `crtip`, `crtrp`, `crtri`, `crtpp`, `crtpc`, `crtup`, `crtgp`, `bs2ri`, `bs2real`, `bs2int`, `ri2bs`, `boundfix`
+- **选择与适应度 (`selection.rs`)**: `tour`, `etour`, `rws`, `sus`, `urs`, `rcs`, `rps`, `ecs`, `otos`, `dup`, `selecting`, `mselecting`, `ranking`, `scaling`, `powing`, `indexing`
+- **交叉与重组 (`recombination.rs`)**: `xovsp`, `xovdp`, `xovud`, `xovsh`, `xovbd`, `xovexp`, `xovsec`, `xovpmx`, `xovox`, `recsbx`, `recdis`, `recint`, `reclin`, `recndx`, `recombin`
+- **变异 (`mutation.rs`)**: `mutpolyn`, `mutgau`, `mutbga`, `mutuni`, `mutbin`, `mutde`, `mutinv`, `mutmove`, `mutswap`, `mutpp`, `mutate`
+- **多目标、约束与迁移 (`multiobjective.rs`)**: `ndsortESS`, `ndsortTNS`, `ndsortDED`, `crowdis`, `cdist`, `mergecv`, `tcheby`, `pbi`, `crtidp`, `awGA`, `rwGA`, `refselect`, `refgselect`, `migrate`
+- **性能指标 (`indicator.rs`)**: `GD`, `IGD`, `Spacing`, `HV`
 
 ---
 
