@@ -17,7 +17,57 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# name: (template, problem factory, encoding, NIND, MAXGEN)
+
+def _problems(ea):
+    """Problems not in ea.benchmarks: maximisation, mixed integers, a constrained single objective."""
+    import numpy as np
+
+    class MaxRastrigin(ea.Problem):  # maximise -Rastrigin (optimum 0)
+        def __init__(self, Dim=10):
+            ea.Problem.__init__(self, 'MaxRastrigin', 1, [-1], Dim, [0] * Dim, [-5.12] * Dim, [5.12] * Dim,
+                                [1] * Dim, [1] * Dim)
+
+        def evalVars(self, x):
+            return -(10 * x.shape[1] + (x ** 2 - 10 * np.cos(2 * np.pi * x)).sum(1, keepdims=True))
+
+    class MixedRastrigin(ea.Problem):  # half the variables are integers in [-5, 5] (optimum 0)
+        def __init__(self, Dim=10):
+            ea.Problem.__init__(self, 'MixedRastrigin', 1, [1], Dim, [0] * (Dim // 2) + [1] * (Dim - Dim // 2),
+                                [-5] * Dim, [5] * Dim, [1] * Dim, [1] * Dim)
+
+        def evalVars(self, x):
+            return 10 * x.shape[1] + (x ** 2 - 10 * np.cos(2 * np.pi * x)).sum(1, keepdims=True)
+
+    class ConSphere(ea.Problem):  # min sum((x-1)^2) s.t. sum(x) <= 5 (optimum 2.5 at x = 0.5)
+        def __init__(self, Dim=10):
+            ea.Problem.__init__(self, 'ConSphere', 1, [1], Dim, [0] * Dim, [-10] * Dim, [10] * Dim,
+                                [1] * Dim, [1] * Dim)
+
+        def evalVars(self, x):
+            return ((x - 1) ** 2).sum(1, keepdims=True), x.sum(1, keepdims=True) - 5
+
+    class MaxZDT1(ea.Problem):  # ZDT1 with both objectives negated and maximised
+        def __init__(self, Dim=30):
+            self.base = ea.benchmarks.ZDT1(Dim=Dim)  # before Problem.__init__, which may ask for the front
+            ea.Problem.__init__(self, 'MaxZDT1', 2, [-1, -1], Dim, [0] * Dim, [0] * Dim, [1] * Dim,
+                                [1] * Dim, [1] * Dim)
+
+        def evalVars(self, x):
+            return -self.base.evalVars(x)
+
+        def calReferObjV(self):
+            return -self.base.calReferObjV()
+
+    return {'MaxRastrigin': MaxRastrigin, 'MixedRastrigin': MixedRastrigin, 'ConSphere': ConSphere,
+            'MaxZDT1': MaxZDT1}
+
+
+def _p(name, *args):
+    return lambda ea: _problems(ea)[name](*args)
+
+
+# name: (template, problem factory, encoding, NIND, MAXGEN). The encoding may also be
+# ('psy', [encodings], [variable indices per encoding]) or ('multi', encoding, number of populations).
 CASES = [
     ('ackley_DE_rand_1_bin', 'soea_DE_rand_1_bin_templet', lambda ea: ea.benchmarks.Ackley(30), 'RI', 50, 1000),
     ('rosenbrock_DE_best_1_L', 'soea_DE_best_1_L_templet', lambda ea: ea.benchmarks.Rosenbrock(30), 'RI', 50, 1000),
@@ -35,7 +85,43 @@ CASES = [
     ('dtlz2_RVEA', 'moea_RVEA_templet', lambda ea: ea.benchmarks.DTLZ2(3), 'RI', 105, 300),
     ('c1dtlz1_NSGA3', 'moea_NSGA3_templet', lambda ea: ea.benchmarks.C1_DTLZ1(3), 'RI', 92, 500),
     ('bnh_NSGA2', 'moea_NSGA2_templet', lambda ea: ea.benchmarks.BNH(), 'RI', 100, 200),
+    # paths the cases above do not reach
+    ('maxrastrigin_SEGA_RI', 'soea_SEGA_templet', _p('MaxRastrigin'), 'RI', 50, 500),
+    ('maxrastrigin_DE_rand_1_bin', 'soea_DE_rand_1_bin_templet', _p('MaxRastrigin'), 'RI', 50, 500),
+    ('maxzdt1_NSGA2', 'moea_NSGA2_templet', _p('MaxZDT1'), 'RI', 100, 200),
+    ('maxzdt1_MOEAD', 'moea_MOEAD_templet', _p('MaxZDT1'), 'RI', 100, 200),
+    ('mixedint_SEGA_RI', 'soea_SEGA_templet', _p('MixedRastrigin'), 'RI', 50, 500),
+    ('mixedint_DE_rand_1_bin', 'soea_DE_rand_1_bin_templet', _p('MixedRastrigin'), 'RI', 50, 500),
+    ('mixedint_SEGA_BG', 'soea_SEGA_templet', _p('MixedRastrigin'), 'BG', 50, 500),
+    ('consphere_SEGA_RI', 'soea_SEGA_templet', _p('ConSphere'), 'RI', 50, 500),
+    ('consphere_DE_best_1_L', 'soea_DE_best_1_L_templet', _p('ConSphere'), 'RI', 50, 500),
+    ('rastrigin_SEGA_RI_odd', 'soea_SEGA_templet', lambda ea: ea.benchmarks.Rastrigrin(10), 'RI', 51, 500),
+    ('zdt1_NSGA2_odd', 'moea_NSGA2_templet', lambda ea: ea.benchmarks.ZDT1(), 'RI', 101, 200),
+    ('att48_SGA_P', 'soea_SGA_templet', lambda ea: ea.benchmarks.TSP('att48'), 'P', 100, 1000),
+    ('att48_EGA_P', 'soea_EGA_templet', lambda ea: ea.benchmarks.TSP('att48'), 'P', 100, 1000),
+    ('att48_steadyGA_P', 'soea_steadyGA_templet', lambda ea: ea.benchmarks.TSP('att48'), 'P', 100, 1000),
+    ('att48_GGAP_SGA_P', 'soea_GGAP_SGA_templet', lambda ea: ea.benchmarks.TSP('att48'), 'P', 100, 1000),
+    ('rastrigin_multi_SEGA', 'soea_multi_SEGA_templet', lambda ea: ea.benchmarks.Rastrigrin(30), ('multi', 'RI', 3),
+     30, 500),
+    ('rastrigin_psy_SEGA', 'soea_psy_SEGA_templet', lambda ea: ea.benchmarks.Rastrigrin(10),
+     ('psy', ['BG', 'RI'], [list(range(5)), list(range(5, 10))]), 50, 500),
+    ('rastrigin_psy_studGA', 'soea_psy_studGA_templet', lambda ea: ea.benchmarks.Rastrigrin(10),
+     ('psy', ['RI', 'BG'], [list(range(5)), list(range(5, 10))]), 50, 500),
+    ('zdt1_psy_NSGA2', 'moea_psy_NSGA2_templet', lambda ea: ea.benchmarks.ZDT1(),
+     ('psy', ['RI', 'BG'], [list(range(15)), list(range(15, 30))]), 100, 200),
+    ('dtlz2_psy_NSGA3', 'moea_psy_NSGA3_templet', lambda ea: ea.benchmarks.DTLZ2(3),
+     ('psy', ['RI', 'BG'], [list(range(6)), list(range(6, 12))]), 91, 200),
 ]
+
+
+def _population(ea, problem, enc, nind):
+    if isinstance(enc, str):
+        return ea.Population(Encoding=enc, NIND=nind)
+    if enc[0] == 'multi':  # the algorithm does not create the fields of a population list
+        field = ea.crtfld(enc[1], problem.varTypes, problem.ranges, problem.borders)
+        return [ea.Population(enc[1], field, nind) for _ in range(enc[2])]
+    fields = (problem.varTypes, problem.ranges, problem.borders)
+    return ea.PsyPopulation(enc[1], fields, NIND=nind, EncoIdxs=enc[2])
 
 
 def run(name, seed):
@@ -43,11 +129,12 @@ def run(name, seed):
     import geatpy as ea
     tpl, mk, enc, nind, gen = [c[1:] for c in CASES if c[0] == name][0]
     problem = mk(ea)
-    alg = getattr(ea, tpl)(problem, ea.Population(Encoding=enc, NIND=nind), MAXGEN=gen, logTras=0)
+    alg = getattr(ea, tpl)(problem, _population(ea, problem, enc, nind), MAXGEN=gen, logTras=0)
     t = time.time()
     res = ea.optimize(alg, seed=seed, verbose=False, drawing=0, outputMsg=False, drawLog=False, saveFlag=False)
     out = {'case': name, 'seed': seed, 'version': ea.__version__, 'time': time.time() - t}
     objv = res['ObjV']
+    out['feasible'] = bool(res['success'])
     if tpl.startswith('soea'):
         out['best'] = float(objv[0][0]) if objv is not None and len(objv) else None
     else:

@@ -37,7 +37,7 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 | **ABI 兼容性** | 每个 Python 小版本单独构建 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
 | **跨平台预编译** | Windows x86/x64、Linux x86_64、macOS（Apple Silicon 仅 Python 3.8 ~ 3.10），无 Linux ARM64 | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
 | **代码与内存安全** | 边界输入可能触发段错误，导致 Python 进程退出 | **纯安全 Rust（无 `unsafe`），非法输入抛出 Python 异常而非段错误** |
-| **多核并行与性能** | C OpenMP 并行 | 单线程实现（`Parallel` 参数为兼容保留，暂不生效）；16 个经典用例整体耗时为原版的 0.23~0.91 倍 |
+| **多核并行与性能** | C OpenMP 并行 | 单线程实现（`Parallel` 参数为兼容保留，暂不生效）；36 个经典用例耗时为原版的 0.21~1.02 倍 |
 | **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与 42 个算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
 
 ---
@@ -58,8 +58,9 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
   边界值用例同时在官方二进制与 Rust 内核上运行，逐项比对数值、dtype、返回结构与报错，随机算子比对统计分布；
   并由另一模型（Antigravity）独立交叉审查。整数输出与官方一致为 `int32`，参数校验与报错信息与官方一致；
 - **经典用例对比**（`scripts/parity/classic.py`）：Ackley、Rosenbrock、Rastrigin、att48 TSP、ZDT、DTLZ、BNH 等
-  16 个经典问题与算法模板组合，两边各运行 30 次，比较最优值或 IGD/HV 的分布，均无显著差异；
-  同等条件下每个用例的耗时都低于原版。
+  36 个问题与算法模板组合，覆盖最大化、混合整数、带约束、奇数种群、排列编码、多种群与多染色体（psy）模板，
+  两边各运行 30 次比较最优值或 IGD/HV 的分布。除多种群 `soea_multi_SEGA_templet` 外均无显著差异；该模板的
+  迁移用 `Replacement=2`，原版此处淘汰的是最优个体，本项目按文档淘汰最差个体，解明显更好（关闭迁移后两边一致）。
 
 内核行为依据官方文档、docstring 与上述差分测试结果实现。
 官方二进制中有几处与其自身文档不符的缺陷，本项目按文档实现，测试中单独说明：
