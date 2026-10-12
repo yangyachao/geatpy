@@ -55,7 +55,9 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
   （全整数变量时返回 `int32`）、参数校验、`crtidp` 约束处理等细节，期望值均取自官方二进制的实际输出；
 - **随机差分与交叉审查**（`tests/test_core_parity_review2.py`、`scripts/parity/fuzz/`）：约 1500 个随机形状、参数组合与
   边界值用例同时在官方二进制与 Rust 内核上运行，逐项比对数值、dtype、返回结构与报错，随机算子比对统计分布；
-  并由另一模型（Antigravity）独立交叉审查。整数输出与官方一致为 `int32`，参数校验与报错信息与官方一致。
+  并由另一模型（Antigravity）独立交叉审查。整数输出与官方一致为 `int32`，参数校验与报错信息与官方一致；
+- **经典用例对比**（`scripts/parity/classic.py`）：Ackley、Rosenbrock、Rastrigin、att48 TSP、ZDT、DTLZ、BNH 等
+  16 个经典问题与算法模板组合，两边各运行 30 次，比较最优值或 IGD/HV 的分布，均无显著差异。
 
 内核行为依据官方文档、docstring 与上述差分测试结果实现。
 官方二进制中有几处与其自身文档不符的缺陷，本项目按文档实现，测试中单独说明：

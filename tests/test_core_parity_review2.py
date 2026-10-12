@@ -65,6 +65,20 @@ def test_refgselect_keeps_the_individual_at_the_ideal_point():
     assert flag.tolist() == [True, True]
 
 
+HV_O = np.array([[0., 1.], [0.2, 0.1], [0.4, -0.5], [0.8, -0.7]])
+
+
+@pytest.mark.parametrize('objv,pf,expected', [
+    # negative objectives (e.g. ZDT3): the original shifts by min(0, column min) before scaling
+    (HV_O, np.array([[0., 1.], [0.85, -0.77]]), 0.6553773283958435),
+    (HV_O, None, 0.633838415145874),
+    (HV_O - 1, None, 0.5656108856201172),
+    (np.array([[0.5, 0.5, -0.2], [0.1, 0.9, 0.3]]), None, 0.04873780533671379),
+])
+def test_hv_normalises_negative_objectives_like_the_original(objv, pf, expected):
+    assert abs(ea.indicator.HV(objv, pf) - expected) < 1e-6  # the original computes in float32
+
+
 @pytest.mark.parametrize('name', ['recdis', 'xovud'])
 def test_global_uniform_recombination_draws_genes_from_the_whole_population(name):
     out = getattr(ea, name)(ROWS, 1, 8)

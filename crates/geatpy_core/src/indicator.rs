@@ -146,8 +146,10 @@ fn hv_monte_carlo(pts: &[Vec<f64>], refp: &[f64], samples: usize) -> f64 {
     box_vol * hits as f64 / samples as f64
 }
 
-/// Hypervolume of ObjV after dividing by the column maxima of PF (PF defaults to ObjV), with the
-/// reference point 1.1 on every axis, normalised by 1.1^M. Exact for M <= 4, Monte Carlo above.
+/// Hypervolume of ObjV normalised like geatpy 2.7.0: each objective is mapped by
+/// (x - lo) / (hi - lo) with lo = min(0, min of the ObjV column) and hi = 1.1 * max of the PF
+/// column (PF defaults to ObjV); the reference point is 1 on every axis and points beyond it are
+/// dropped. Exact for M <= 4, Monte Carlo above.
 #[pyfunction]
 #[pyo3(signature = (obj_v, pf=None, parallel=None))]
 pub fn HV(obj_v: &Bound<'_, PyAny>, pf: Opt, parallel: Opt) -> PyResult<f64> {
@@ -166,29 +168,33 @@ pub fn HV(obj_v: &Bound<'_, PyAny>, pf: Opt, parallel: Opt) -> PyResult<f64> {
     if n == 0 || m == 0 {
         return Ok(0.0);
     }
-    let scale: Vec<f64> = (0..m)
+    let lo: Vec<f64> = (0..m)
+        .map(|j| p.column(j).iter().cloned().fold(0.0, f64::min))
+        .collect();
+    let hi: Vec<f64> = (0..m)
         .map(|j| {
-            r.column(j)
+            1.1 * r
+                .column(j)
                 .iter()
                 .cloned()
                 .fold(f64::NEG_INFINITY, f64::max)
         })
         .collect();
-    let pts: Vec<Vec<f64>> = (0..n)
-        .map(|i| (0..m).map(|j| p[[i, j]] / scale[j]).collect())
-        .collect();
-    let refp = vec![1.1; m];
-    let inside: Vec<Vec<f64>> = pts
-        .into_iter()
-        .filter(|q| q.iter().all(|&x| x < 1.1))
+    let inside: Vec<Vec<f64>> = (0..n)
+        .map(|i| {
+            (0..m)
+                .map(|j| (p[[i, j]] - lo[j]) / (hi[j] - lo[j]))
+                .collect::<Vec<f64>>()
+        })
+        .filter(|q| q.iter().all(|&x| x < 1.0))
         .collect();
     if inside.is_empty() {
         return Ok(0.0);
     }
-    let vol = if m <= 4 {
+    let refp = vec![1.0; m];
+    Ok(if m <= 4 {
         hv_exact(inside, &refp)
     } else {
         hv_monte_carlo(&inside, &refp, 1_000_000)
-    };
-    Ok(vol / 1.1f64.powi(m as i32))
+    })
 }
