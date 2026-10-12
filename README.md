@@ -37,7 +37,7 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 | **ABI 兼容性** | 每个 Python 小版本单独构建 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
 | **跨平台预编译** | Windows x86/x64、Linux x86_64、macOS（Apple Silicon 仅 Python 3.8 ~ 3.10），无 Linux ARM64 | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
 | **代码与内存安全** | 边界输入可能触发段错误，导致 Python 进程退出 | **纯安全 Rust（无 `unsafe`），非法输入抛出 Python 异常而非段错误** |
-| **多核并行与性能** | C OpenMP 并行 | 当前为单线程实现；`Parallel` 参数为兼容保留，暂不生效 |
+| **多核并行与性能** | C OpenMP 并行 | 单线程实现（`Parallel` 参数为兼容保留，暂不生效）；16 个经典用例整体耗时为原版的 0.23~0.91 倍 |
 | **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与 42 个算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
 
 ---
@@ -49,7 +49,8 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
 - **基准数据**：`scripts/parity/run_original_core.sh` 在 Docker (linux/amd64 + Python 3.6) 中运行官方二进制，
   生成 `tests/fixtures/core_parity_orig_2_7_0.json`；
 - **确定性算子**（非支配排序、拥挤距离、编码解码、适应度分配、参考点、指标、NSGA-III/RVEA 环境选择等）逐值比对；
-- **随机算子**（交叉、变异、选择）按统计特征比对；
+- **随机算子**（交叉、变异、选择）按统计特征比对；与官方一致，随机数取自 numpy 全局随机状态，
+  `np.random.seed` / `ea.optimize(seed=...)` 可完整复现一次运行；
 - **算法模板**（39 个单/多目标模板）比对最终解质量：`GEATPY_PARITY_TEMPLATES=1 pytest tests/test_core_parity.py`；
 - **逐模块复核**（`tests/test_core_parity_review.py`）：对全部内核算子逐一核对，补齐了返回类型
   （全整数变量时返回 `int32`）、参数校验、`crtidp` 约束处理等细节，期望值均取自官方二进制的实际输出；
@@ -57,7 +58,8 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
   边界值用例同时在官方二进制与 Rust 内核上运行，逐项比对数值、dtype、返回结构与报错，随机算子比对统计分布；
   并由另一模型（Antigravity）独立交叉审查。整数输出与官方一致为 `int32`，参数校验与报错信息与官方一致；
 - **经典用例对比**（`scripts/parity/classic.py`）：Ackley、Rosenbrock、Rastrigin、att48 TSP、ZDT、DTLZ、BNH 等
-  16 个经典问题与算法模板组合，两边各运行 30 次，比较最优值或 IGD/HV 的分布，均无显著差异。
+  16 个经典问题与算法模板组合，两边各运行 30 次，比较最优值或 IGD/HV 的分布，均无显著差异；
+  同等条件下每个用例的耗时都低于原版。
 
 内核行为依据官方文档、docstring 与上述差分测试结果实现。
 官方二进制中有几处与其自身文档不符的缺陷，本项目按文档实现，测试中单独说明：
@@ -87,16 +89,16 @@ pip install geatpy-rs
 
 ```bash
 # Linux (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.2/geatpy_rs-2.7.2-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.3/geatpy_rs-2.7.3-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
 # Linux (ARM64 / aarch64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.2/geatpy_rs-2.7.2-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.3/geatpy_rs-2.7.3-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
 # macOS (Universal2 - 支持 Apple Silicon M1/M2/M3/M4 以及 Intel Mac)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.2/geatpy_rs-2.7.2-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.3/geatpy_rs-2.7.3-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
 
 # Windows (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.2/geatpy_rs-2.7.2-cp38-abi3-win_amd64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.3/geatpy_rs-2.7.3-cp38-abi3-win_amd64.whl
 ```
 
 ### 方式三：从源码本地构建

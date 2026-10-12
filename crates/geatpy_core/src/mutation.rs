@@ -89,7 +89,7 @@ pub fn mutpolyn<'py>(
     let pm = default_pm(pm, d, "mutpolyn")?;
     let eta = per_gene(dis_i, d, 20.0, "DisI")?;
     let fix = crate::utils::fix_type(fix_type, "mutpolyn")?;
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     for i in 0..n {
         for j in 0..d {
             let mut x = if b.span[j] > 1e-15 {
@@ -187,7 +187,7 @@ pub fn mutgau<'py>(
             )
         }
     };
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     for i in 0..n {
         for j in 0..d {
             let mut x;
@@ -271,7 +271,7 @@ pub fn mutbga<'py>(
     let fix = crate::utils::fix_type(fix_type, "mutbga")?;
     // The mutation range doubles as the repair span, as in the reference implementation.
     let range: Vec<f64> = (0..d).map(|j| b.span[j] * shrink[j]).collect();
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     for i in 0..n {
         for j in 0..d {
             let mut x;
@@ -350,7 +350,7 @@ pub fn mutuni<'py>(
             )
         }
     };
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     for i in 0..n {
         for j in 0..d {
             let mut x;
@@ -401,18 +401,43 @@ pub fn mutbin<'py>(
             "error in mutbin: The encoding must be 'BG'. (编码方式必须为'BG'。)",
         ));
     }
+    // integer chromosomes (the usual case) are flipped in place without a round trip through f64
+    if let Some(mut chrom) = crate::utils::to_i32_array2(old_chrom) {
+        let d = chrom.shape()[1];
+        let pm = default_pm(pm, d, "mutbin")?;
+        let flat = chrom.as_slice_mut().expect("owned arrays are contiguous");
+        for k in flip_positions(flat.len(), d, &pm) {
+            flat[k] = 1 - flat[k];
+        }
+        return Ok(chrom.into_pyarray(py).into_any().unbind());
+    }
     let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let (n, d) = (chrom.shape()[0], chrom.shape()[1]);
+    let d = chrom.shape()[1];
     let pm = default_pm(pm, d, "mutbin")?;
-    let mut rng = rand::thread_rng();
-    for i in 0..n {
-        for j in 0..d {
-            if rng.gen::<f64>() < pm[j] {
-                chrom[[i, j]] = 1.0 - chrom[[i, j]];
+    let flat = chrom.as_slice_mut().expect("owned arrays are contiguous");
+    for k in flip_positions(flat.len(), d, &pm) {
+        flat[k] = 1.0 - flat[k];
+    }
+    chrom_out(py, chrom, true)
+}
+
+/// Row-major indices of the genes that flip, each gene independently with probability pm[column].
+fn flip_positions(total: usize, d: usize, pm: &[f64]) -> Vec<usize> {
+    let mut rng = crate::utils::rng();
+    let mut hits = Vec::new();
+    if d == 0 {
+        return hits;
+    }
+    if pm.iter().all(|&p| p == pm[0]) {
+        crate::utils::for_each_hit(total, pm[0], &mut rng, |k| hits.push(k));
+    } else {
+        for k in 0..total {
+            if rng.gen::<f64>() < pm[k % d] {
+                hits.push(k);
             }
         }
     }
-    chrom_out(py, chrom, true)
+    hits
 }
 
 /// Draw without replacement from `pool`; falls back to any index when the pool is exhausted.
@@ -554,10 +579,10 @@ pub fn mutde<'py>(
     // a negative value marks "draw F at random"
     let (f1, f2) = (fa_opt.unwrap_or(-1.0), fb_opt.unwrap_or(-1.0));
 
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     // Trial values of row i on `cols`, with freshly drawn donors and F (the target row is excluded
     // from the donors when one offspring is produced per individual).
-    let trial = |i: usize, cols: &[usize], rng: &mut rand::rngs::ThreadRng| -> Vec<f64> {
+    let trial = |i: usize, cols: &[usize], rng: &mut rand::rngs::SmallRng| -> Vec<f64> {
         let mut pool: Vec<usize> = (0..n).filter(|&k| !(rows == n && k == i)).collect();
         let vecs: Vec<Vec<f64>> = xrs
             .iter()
@@ -615,19 +640,56 @@ pub fn mutde<'py>(
 /// Segment length in [lo, max_len] such that every (start, length) pair is equally likely.
 fn segment_len<R: Rng>(l: usize, max_len: usize, lo: usize, rng: &mut R) -> usize {
     let max_len = max_len.clamp(lo, l.max(lo));
-    let weights: Vec<usize> = (lo..=max_len).map(|k| l + 1 - k.min(l)).collect();
-    let total: usize = weights.iter().sum();
+    let total = segment_total(l, max_len, lo);
     if total == 0 {
         return lo;
     }
-    let mut r = rng.gen_range(0..total);
-    for (k, w) in (lo..=max_len).zip(weights) {
-        if r < w {
-            return k;
-        }
-        r -= w;
+    segment_pick(l, max_len, lo, rng.gen_range(0..total))
+}
+
+/// Weight of length k is l + 1 - k (the number of places a segment of that length fits).
+fn segment_weight(l: usize, k: usize) -> usize {
+    l + 1 - k.min(l)
+}
+
+/// Sum of the weights of lengths lo..=max_len (an arithmetic series when lo <= l).
+fn segment_total(l: usize, max_len: usize, lo: usize) -> usize {
+    if lo <= l {
+        let t = max_len - lo + 1;
+        t * segment_weight(l, lo) - t * (t - 1) / 2
+    } else {
+        (lo..=max_len).map(|k| segment_weight(l, k)).sum()
     }
-    max_len
+}
+
+/// The length whose cumulative weight first exceeds r: the smallest count t with
+/// S(t) = a*t - t*(t-1)/2 > r (a = weight of lo), from the quadratic formula and then stepped to
+/// the exact integer, so it equals scanning the weights one by one.
+fn segment_pick(l: usize, max_len: usize, lo: usize, r: usize) -> usize {
+    if lo > l {
+        let mut r = r;
+        for k in lo..=max_len {
+            let w = segment_weight(l, k);
+            if r < w {
+                return k;
+            }
+            r -= w;
+        }
+        return max_len;
+    }
+    let a = segment_weight(l, lo);
+    let count = max_len - lo + 1;
+    let s = |t: usize| t * a - t * t.saturating_sub(1) / 2;
+    let b = 2.0 * a as f64 + 1.0;
+    let disc = (b * b - 8.0 * r as f64).max(0.0);
+    let mut t = (((b - disc.sqrt()) / 2.0).floor().max(0.0) as usize + 1).min(count);
+    while t < count && s(t) <= r {
+        t += 1;
+    }
+    while t > 1 && s(t - 1) > r {
+        t -= 1;
+    }
+    lo + t - 1
 }
 
 /// Parses InvertLen / MoveLen: int => maximum length, [k] => fixed length, None => default. Both forms
@@ -749,39 +811,63 @@ pub fn mutinv<'py>(
     let _ = (parallel, params6, params7);
     check_order_encoding(encoding, "mutinv")?;
     let as_int = is_integer_like(old_chrom);
-    let mut chrom = crate::utils::to_f64_array2(old_chrom)?;
-    let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
+    // integer 'P' chromosomes are reversed in place as i32 (no round trip through f64)
+    let int_chrom = if as_int && encoding == "P" {
+        crate::utils::to_i32_array2(old_chrom)
+    } else {
+        None
+    };
+    let float_chrom = match int_chrom {
+        Some(_) => None,
+        None => Some(crate::utils::to_f64_array2(old_chrom)?),
+    };
+    let l = match (&int_chrom, &float_chrom) {
+        (Some(c), _) => c.ncols(),
+        (_, Some(c)) => c.ncols(),
+        _ => unreachable!(),
+    };
     let pm = pm_vec(pm, 1, 1.0, "mutinv")?[0];
     let (len, fixed) = parse_len(invert_len, l, "mutinv", "InvertLen", 2)?;
     if let Some(out) = short_permutation(encoding, old_chrom, l)? {
         return Ok(out);
     }
     let len = len.min(l);
-    let mut rng = rand::thread_rng();
-    if l >= 2 {
-        for i in 0..n {
-            if rng.gen::<f64>() >= pm {
-                continue;
-            }
-            let k = if fixed {
-                len.max(2)
-            } else {
-                segment_len(l, len, 2, &mut rng)
-            };
-            let start = rng.gen_range(0..=(l - k));
-            let mut row = chrom.row_mut(i);
-            let seg: Vec<f64> = (start..start + k).map(|j| row[j]).collect();
-            for (t, v) in seg.into_iter().rev().enumerate() {
-                row[start + t] = v;
-            }
-        }
+    let mut rng = crate::utils::rng();
+    if let Some(mut chrom) = int_chrom {
+        invert_rows(&mut chrom, pm, len, fixed, &mut rng);
+        return Ok(chrom.into_pyarray(py).into_any().unbind());
     }
+    let mut chrom = float_chrom.expect("set when not integer");
+    invert_rows(&mut chrom, pm, len, fixed, &mut rng);
     let discrete = if encoding == "RI" {
         random_repair_rows(&mut chrom, field_dr, &mut rng)?
     } else {
         None
     };
     order_out(py, chrom, discrete, as_int)
+}
+
+/// Reverses one segment of each row with probability pm (segment length: fixed, or drawn with
+/// weights proportional to the number of places it fits).
+fn invert_rows<T, R: Rng>(chrom: &mut Array2<T>, pm: f64, len: usize, fixed: bool, rng: &mut R) {
+    let l = chrom.ncols();
+    if l < 2 {
+        return;
+    }
+    for mut row in chrom.rows_mut() {
+        if rng.gen::<f64>() >= pm {
+            continue;
+        }
+        let k = if fixed {
+            len.max(2)
+        } else {
+            segment_len(l, len, 2, rng)
+        };
+        let start = rng.gen_range(0..=(l - k));
+        for t in 0..k / 2 {
+            row.swap(start + t, start + k - 1 - t);
+        }
+    }
 }
 
 /// Shift mutation: move one segment to another position, optionally reversing it with probability Pr.
@@ -816,7 +902,7 @@ pub fn mutmove<'py>(
         return Ok(out);
     }
     let len = len.min(l.saturating_sub(1)).max(1);
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     if l >= 2 {
         for i in 0..n {
             if rng.gen::<f64>() >= pm {
@@ -876,7 +962,7 @@ pub fn mutswap<'py>(
     if let Some(out) = short_permutation(encoding, old_chrom, l)? {
         return Ok(out);
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     if l >= 2 {
         for i in 0..n {
             if rng.gen::<f64>() < pm {
@@ -953,7 +1039,7 @@ pub fn mutpp<'py>(
             }
         },
     };
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     if l >= 1 && range >= 2 {
         for i in 0..n {
             if rng.gen::<f64>() >= pm {
@@ -1013,4 +1099,36 @@ pub fn mutate<'py>(
         .import("_geatpy_core")
         .or_else(|_| py.import("geatpy._geatpy_core"))?;
     Ok(module.getattr(name.as_str())?.call(args, kwargs)?.unbind())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_pick_matches_a_linear_scan() {
+        for l in 0..70 {
+            for lo in 1..4 {
+                for max_len in lo..l + 3 {
+                    let max_len = max_len.clamp(lo, l.max(lo));
+                    let total = segment_total(l, max_len, lo);
+                    let scan: usize = (lo..=max_len).map(|k| segment_weight(l, k)).sum();
+                    assert_eq!(total, scan);
+                    let mut k = lo;
+                    let mut acc = segment_weight(l, k);
+                    for r in 0..total {
+                        while r >= acc {
+                            k += 1;
+                            acc += segment_weight(l, k);
+                        }
+                        assert_eq!(
+                            segment_pick(l, max_len, lo, r),
+                            k,
+                            "l={l} lo={lo} max={max_len} r={r}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

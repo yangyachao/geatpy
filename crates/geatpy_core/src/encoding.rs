@@ -1,4 +1,4 @@
-use numpy::ndarray::Array2;
+use numpy::ndarray::{Array2, ArrayView2};
 use numpy::{IntoPyArray, PyArray2};
 use pyo3::prelude::*;
 use rand::seq::SliceRandom;
@@ -187,21 +187,80 @@ fn parse_field_d(obj: &Bound<'_, PyAny>, lind: Option<usize>, name: &str) -> PyR
     Ok(fd)
 }
 
-/// Integer value of one binary / Gray-coded gene segment.
-fn segment_value(bits: impl Iterator<Item = f64>, gray: bool) -> u64 {
-    let mut v = 0u64;
-    let mut parity = 0u64;
-    for b in bits {
-        let bit = (b > 0.5) as u64;
-        let bin = if gray {
-            parity ^= bit;
-            parity
-        } else {
-            bit
+/// Decodes every row of `c` (one bit per element, `one` tells which values are 1) into `phen`.
+fn decode_view<T: Copy>(
+    c: ArrayView2<'_, T>,
+    one: impl Fn(T) -> bool + Copy,
+    field: &Bound<'_, PyAny>,
+    mode: &Decode,
+    name: &str,
+) -> PyResult<(Array2<f64>, FieldD)> {
+    let f = parse_field_d(field, Some(c.ncols()), name)?;
+    let d = f.lens.len();
+    let mut phen = Array2::<f64>::zeros((c.nrows(), d));
+    // per-variable constants, hoisted out of the row loop (same arithmetic as before)
+    let starts: Vec<usize> = f
+        .lens
+        .iter()
+        .scan(0, |s, &l| {
+            let start = *s;
+            *s += l;
+            Some(start)
+        })
+        .collect();
+    let full: Vec<f64> = f.lens.iter().map(|&l| 2f64.powi(l as i32)).collect();
+    // weight of every chromosome position within its segment (most significant bit first; codes
+    // are at most 31 bits), so a segment decodes as an OR of selected weights, which vectorises
+    let weights: Vec<u32> = f
+        .lens
+        .iter()
+        .flat_map(|&l| (0..l).rev().map(|t| 1u32 << t))
+        .collect();
+    let span: Vec<f64> = (0..d).map(|j| (f.ub[j] - f.lb[j]).abs()).collect();
+    let out = phen.as_slice_mut().expect("fresh arrays are contiguous");
+    for (i, row) in c.outer_iter().enumerate() {
+        let owned;
+        let row: &[T] = match row.as_slice() {
+            Some(s) => s,
+            None => {
+                owned = row.to_vec();
+                &owned
+            }
         };
-        v = (v << 1) | bin;
+        let out_row = &mut out[i * d..(i + 1) * d];
+        for j in 0..d {
+            let (a, b) = (starts[j], starts[j] + f.lens[j]);
+            let mut v = row[a..b]
+                .iter()
+                .zip(&weights[a..b])
+                .fold(0u32, |acc, (&bit, &w)| acc | if one(bit) { w } else { 0 })
+                as u64;
+            if f.gray[j] {
+                // binary bit = XOR of all Gray bits above and at it (prefix XOR from the top)
+                v ^= v >> 1;
+                v ^= v >> 2;
+                v ^= v >> 4;
+                v ^= v >> 8;
+                v ^= v >> 16;
+            }
+            let k = v as f64;
+            out_row[j] = match mode {
+                Decode::Int => {
+                    let (lb, ub) = (f.lb[j] as i64, f.ub[j] as i64);
+                    (lb + (k as i64 * (ub - lb).abs()) / (full[j] as i64 - 1)) as f64
+                }
+                Decode::Mixed if f.discrete[j] => {
+                    f.lb[j] + (k * span[j] / (full[j] - 1.0) + 0.5).trunc()
+                }
+                _ => {
+                    let offset = if f.lbin[j] { 0.0 } else { 1.0 };
+                    let denom = full[j] + 1.0 - f.ubin[j] as u8 as f64 - f.lbin[j] as u8 as f64;
+                    f.lb[j] + (k + offset) * span[j] / denom
+                }
+            };
+        }
     }
-    v
+    Ok((phen, f))
 }
 
 enum Decode {
@@ -221,33 +280,15 @@ fn decode_bg<'py>(
         Decode::Real => "bs2real",
         Decode::Int => "bs2int",
     };
-    let c = crate::utils::to_f64_array2(chrom)?;
-    let (n, lind) = (c.shape()[0], c.shape()[1]);
-    let f = parse_field_d(field, Some(lind), name)?;
-    let d = f.lens.len();
-    let mut phen = Array2::<f64>::zeros((n, d));
-    for i in 0..n {
-        let mut start = 0;
-        for j in 0..d {
-            let l = f.lens[j];
-            let k = segment_value((start..start + l).map(|t| c[[i, t]]), f.gray[j]) as f64;
-            start += l;
-            let full = 2f64.powi(l as i32);
-            let span = (f.ub[j] - f.lb[j]).abs();
-            phen[[i, j]] = match mode {
-                Decode::Int => {
-                    let (lb, ub) = (f.lb[j] as i64, f.ub[j] as i64);
-                    (lb + (k as i64 * (ub - lb).abs()) / (full as i64 - 1)) as f64
-                }
-                Decode::Mixed if f.discrete[j] => f.lb[j] + (k * span / (full - 1.0) + 0.5).trunc(),
-                _ => {
-                    let offset = if f.lbin[j] { 0.0 } else { 1.0 };
-                    let denom = full + 1.0 - f.ubin[j] as u8 as f64 - f.lbin[j] as u8 as f64;
-                    f.lb[j] + (k + offset) * span / denom
-                }
-            };
-        }
-    }
+    // integer chromosomes (the usual case) are decoded straight from the numpy buffer
+    let (phen, f) = if let Ok(ro) = chrom.extract::<numpy::PyReadonlyArray2<i32>>() {
+        decode_view(ro.as_array(), |b| b > 0, field, &mode, name)?
+    } else if let Ok(ro) = chrom.extract::<numpy::PyReadonlyArray2<i64>>() {
+        decode_view(ro.as_array(), |b| b > 0, field, &mode, name)?
+    } else {
+        let c = crate::utils::to_f64_array2(chrom)?;
+        decode_view(c.view(), |b| b > 0.5, field, &mode, name)?
+    };
     match mode {
         Decode::Mixed => crate::utils::ri_out(py, phen, &f.discrete),
         _ => crate::utils::chrom_out(py, phen, matches!(mode, Decode::Int)),
@@ -365,7 +406,7 @@ pub fn boundfix<'py>(
     let d = chrom.shape()[1];
     let b = crate::utils::bounds(&crate::utils::to_f64_array2(field_dr)?, d, true)?;
     let fix = crate::utils::fix_type(fix_type, "boundfix")?;
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     for mut row in chrom.rows_mut() {
         for j in 0..d {
             let x = crate::utils::fix_value(row[j], b.lb[j], b.ub[j], b.span[j], fix, &mut rng);
@@ -409,7 +450,7 @@ pub fn crtbp<'py>(
 }
 
 fn random_bits(py: Python<'_>, nind: usize, lind: usize) -> PyObject {
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, lind), |_| rng.gen_range(0..2i64));
     chrom.into_pyarray(py).into_any().unbind()
 }
@@ -454,7 +495,7 @@ pub fn crtip<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let b = self::field_dr(field_dr)?;
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, b.lb.len()), |(_, j)| {
         uniform_int(b.lb[j], b.ub[j], &mut rng)
     });
@@ -472,7 +513,7 @@ pub fn crtrp<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let b = self::field_dr(field_dr)?;
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, b.lb.len()), |(_, j)| {
         uniform_real(b.lb[j], b.ub[j], &mut rng)
     });
@@ -490,7 +531,7 @@ pub fn crtri<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let b = self::field_dr(field_dr)?;
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, b.lb.len()), |(_, j)| {
         if b.discrete[j] {
             uniform_int(b.lb[j], b.ub[j], &mut rng)
@@ -528,7 +569,7 @@ pub fn crtpp<'py>(
             "error in crtpp: Ub - Lb + 1 must not be smaller than the chromosome length.",
         ));
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let mut chrom = Array2::<f64>::zeros((nind, lind));
     for mut row in chrom.rows_mut() {
         let picked: Vec<f64> = base.choose_multiple(&mut rng, lind).cloned().collect();

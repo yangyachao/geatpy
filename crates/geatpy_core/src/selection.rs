@@ -65,7 +65,7 @@ fn dup_idx(fit: &[f64], nsel: usize) -> Vec<usize> {
     }
     let order = order_desc(fit);
     let mut out: Vec<usize> = (0..nsel).map(|i| order[i % n]).collect();
-    out.shuffle(&mut rand::thread_rng());
+    out.shuffle(&mut crate::utils::rng());
     out
 }
 
@@ -75,7 +75,7 @@ fn tour_idx(fit: &[f64], nsel: usize, k: usize, elitist: bool) -> Vec<usize> {
         return vec![];
     }
     let k = if k >= 1 && k <= n { k } else { 2.min(n) };
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     // A later contestant wins only when strictly fitter (ties keep the first one drawn).
     let mut out: Vec<usize> = (0..nsel)
         .map(|_| {
@@ -116,7 +116,7 @@ fn cumulative(fit: &[f64]) -> (Vec<f64>, f64) {
 
 fn rws_idx(fit: &[f64], nsel: usize) -> Vec<usize> {
     let n = fit.len();
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let (cum, total) = cumulative(fit);
     (0..nsel)
         .map(|_| {
@@ -134,7 +134,7 @@ fn rws_idx(fit: &[f64], nsel: usize) -> Vec<usize> {
 
 fn sus_idx(fit: &[f64], nsel: usize) -> Vec<usize> {
     let n = fit.len();
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let (cum, total) = cumulative(fit);
     if n == 0 || nsel == 0 {
         return vec![];
@@ -154,7 +154,7 @@ fn sus_idx(fit: &[f64], nsel: usize) -> Vec<usize> {
 }
 
 fn urs_idx(n: usize, nsel: usize) -> Vec<usize> {
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     if n == 0 {
         return vec![];
     }
@@ -163,7 +163,7 @@ fn urs_idx(n: usize, nsel: usize) -> Vec<usize> {
 
 fn rps_idx(n: usize, nsel: usize) -> Vec<usize> {
     let mut v: Vec<usize> = (0..n).collect();
-    v.shuffle(&mut rand::thread_rng());
+    v.shuffle(&mut crate::utils::rng());
     v.truncate(nsel.min(n));
     v
 }
@@ -173,7 +173,7 @@ fn rcs_idx(n: usize) -> Vec<usize> {
         return vec![];
     }
     let rg = if n > 1 {
-        rand::thread_rng().gen_range(1..n)
+        crate::utils::rng().gen_range(1..n)
     } else {
         0
     };
@@ -205,7 +205,7 @@ fn otos_idx(fit: &[f64], nsel: usize) -> PyResult<Vec<usize>> {
                 .fold(j, |best, i| if fit[i] > fit[best] { i } else { best })
         })
         .collect();
-    out.shuffle(&mut rand::thread_rng());
+    out.shuffle(&mut crate::utils::rng());
     Ok(out)
 }
 

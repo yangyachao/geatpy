@@ -45,7 +45,11 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 | Rust 内核 | `maturin develop --release` 后 `python -m pytest tests -q`；`cargo fmt --check`；`cargo clippy -- -D warnings` |
 | 有意改变输出 | 在 Docker 中用官方二进制重新生成黄金文件（`scripts/parity/run_original_core.sh`），提交说明写明原因 |
 | 改了算子行为或校验 | 用 `scripts/parity/fuzz/` 对官方二进制做随机差分（见其 README，官方 macOS arm64 轮子可在本机原生运行） |
+| 改了随机算子或性能路径 | 另跑 `scripts/parity/classic.py`（16 个经典用例，两边各 30 次，`cmp` 中 \|z\| > 3 需复查） |
 | 仅文档 | 检查内容与引用路径 |
 
+- 随机数一律用 `crate::utils::rng()`（每次调用从 numpy 全局 RandomState 取种子，`np.random.seed` 才能复现），不要用 `thread_rng`。
+- 性能优化只改实现、不改算法：每个基因/个体的概率与原版相同（例如 `mutbin` 用几何分布跳跃抽取变异位），改后用 fuzz 与
+  `scripts/parity/classic.py` 确认分布与解质量不变。
 - 提交信息用英文 Conventional Commits；README 与设计文档用中文；Rust 注释用英文。
 - `reverse/` 下的反编译内容不得提交或发布。

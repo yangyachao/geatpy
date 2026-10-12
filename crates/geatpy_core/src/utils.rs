@@ -1,6 +1,27 @@
 use numpy::ndarray::{Array1, Array2};
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
+use pyo3::types::IntoPyDict;
+
+/// Random generator for one operator call, seeded from numpy's global RandomState: like geatpy
+/// 2.7.0, `np.random.seed` (and `ea.optimize(seed=...)`) then makes whole runs reproducible.
+/// Every caller holds the GIL, so `with_gil` only re-enters it.
+pub fn rng() -> rand::rngs::SmallRng {
+    use rand::SeedableRng;
+    static RANDINT: GILOnceCell<Py<PyAny>> = GILOnceCell::new();
+    let seed = Python::with_gil(|py| -> PyResult<u64> {
+        let randint = RANDINT.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(py.import("numpy.random")?.getattr("randint")?.unbind())
+        })?;
+        let kwargs = [("dtype", "uint64")].into_py_dict(py)?;
+        randint
+            .bind(py)
+            .call((0u64, u64::MAX), Some(&kwargs))?
+            .extract()
+    });
+    rand::rngs::SmallRng::seed_from_u64(seed.unwrap_or_else(|_| rand::random()))
+}
 
 /// numpy.asarray(obj, dtype=float64) for lists, tuples, scalars and other array-likes.
 fn as_float_array<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
@@ -125,6 +146,42 @@ pub fn to_f64_array1<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Array1<f64>> {
     Err(pyo3::exceptions::PyTypeError::new_err(
         "Expected 1D numeric numpy array",
     ))
+}
+
+/// An int32/int64 numpy matrix as i32 (chromosome values are small), or None for any other input.
+pub fn to_i32_array2(obj: &Bound<'_, PyAny>) -> Option<Array2<i32>> {
+    if let Ok(ro) = obj.extract::<PyReadonlyArray2<i32>>() {
+        return Some(ro.as_array().to_owned());
+    }
+    if let Ok(ro) = obj.extract::<PyReadonlyArray2<i64>>() {
+        return Some(ro.as_array().mapv(|x| x as i32));
+    }
+    None
+}
+
+/// Calls `f(k)` for every k in 0..total selected by independent Bernoulli(p) trials. Draws the
+/// geometric gaps between hits instead of one uniform per index: same distribution, far fewer
+/// random numbers when p is small (e.g. the default Pm = 1/L).
+pub fn for_each_hit<R: rand::Rng>(total: usize, p: f64, rng: &mut R, mut f: impl FnMut(usize)) {
+    if total == 0 || p <= 0.0 {
+        return;
+    }
+    if p >= 1.0 {
+        (0..total).for_each(f);
+        return;
+    }
+    let ln_q = (-p).ln_1p();
+    let mut k = 0usize;
+    while k < total {
+        let u = 1.0 - rng.gen::<f64>(); // (0, 1]
+        let gap = (u.ln() / ln_q).floor();
+        if gap >= (total - k) as f64 {
+            break;
+        }
+        k += gap as usize;
+        f(k);
+        k += 1;
+    }
 }
 
 /// True when `obj` is a numpy array (or Python sequence) holding integers or booleans.

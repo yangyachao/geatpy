@@ -139,3 +139,35 @@ def test_invalid_arguments_raise_runtime_error(call):
 ])
 def test_valid_edge_arguments_are_accepted(call):
     call()
+
+
+# --- reproducibility: the random operators draw from numpy's global RandomState, like the original --
+FD_BG = ea.crtfld('BG', np.array([0, 0]), np.array([[0., 0], [1, 1]]), np.array([[1, 1], [1, 1]]))
+BITS = np.random.RandomState(0).randint(0, 2, (6, int(FD_BG[0].sum())))
+REAL = np.random.RandomState(1).rand(6, 3)
+FDR3 = np.array([[0., 0, 0], [1, 1, 1], [0, 0, 0]])
+
+
+@pytest.mark.parametrize('call', [
+    lambda: ea.crtbp(4, 6), lambda: ea.crtrp(4, FDR3), lambda: ea.crtpp(4, FP),
+    lambda: ea.mutbin('BG', BITS), lambda: ea.xovdp(BITS, 1), lambda: ea.xovud(BITS, 0.5),
+    lambda: ea.xovpmx(PERM), lambda: ea.mutinv('P', PERM, FP, 1),
+    lambda: ea.recsbx(REAL, 1), lambda: ea.mutpolyn('RI', REAL, FDR3, 1),
+    lambda: ea.mutgau('RI', REAL, FDR3, 1), lambda: ea.selecting('tour', F6, 6),
+    lambda: ea.selecting('rws', F6, 6),
+])
+def test_np_random_seed_makes_operators_reproducible(call):
+    np.random.seed(123)
+    a = call()
+    np.random.seed(123)
+    b = call()
+    np.testing.assert_array_equal(a, b)
+
+
+def test_optimize_seed_makes_runs_reproducible():
+    def run():
+        problem = ea.benchmarks.Rastrigrin(5)
+        alg = ea.soea_SEGA_templet(problem, ea.Population(Encoding='BG', NIND=20), MAXGEN=30, logTras=0)
+        res = ea.optimize(alg, seed=7, verbose=False, drawing=0, outputMsg=False, drawLog=False, saveFlag=False)
+        return res['ObjV'][0][0]
+    assert run() == run()

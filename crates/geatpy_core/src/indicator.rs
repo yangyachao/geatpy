@@ -134,7 +134,7 @@ fn hv_monte_carlo(pts: &[Vec<f64>], refp: &[f64], samples: usize) -> f64 {
         .map(|j| pts.iter().map(|p| p[j]).fold(f64::INFINITY, f64::min))
         .collect();
     let box_vol: f64 = (0..m).map(|j| refp[j] - lo[j]).product();
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let hits = (0..samples)
         .filter(|_| {
             let s: Vec<f64> = (0..m)

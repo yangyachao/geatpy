@@ -595,7 +595,7 @@ pub fn rwGA<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let r: Vec<f64> = (0..m).map(|_| rng.gen::<f64>()).collect();
     let total: f64 = r.iter().sum();
     let mut out = Array2::<f64>::zeros((n, 1));
@@ -977,7 +977,7 @@ pub fn migrate<'py>(
             "error in migrate: FitnVs is required when Select=1 or Replacement=2. (此时必须传入FitnVs。)",
         ));
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = crate::utils::rng();
     let by_fitness_desc = |i: usize| -> Vec<usize> {
         let f = &fits.as_ref().unwrap()[i];
         let mut o: Vec<usize> = (0..pop_sizes[i]).collect();
