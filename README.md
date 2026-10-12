@@ -3,7 +3,7 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 
 [English](README.en.md) | **中文**
 
-[![CI](https://github.com/yangyachao/geatpy/actions/workflows/ci.yml/badge.svg)](https://github.com/yangyachao/geatpy/actions/workflows/ci.yml)
+[![Release](https://github.com/yangyachao/geatpy/actions/workflows/release.yml/badge.svg)](https://github.com/yangyachao/geatpy/actions/workflows/release.yml)
 [![Release](https://img.shields.io/github/v/release/yangyachao/geatpy?color=blue&logo=github)](https://github.com/yangyachao/geatpy/releases)
 [![Python Version](https://img.shields.io/badge/python-3.8_~_3.15-blue.svg?logo=python&logoColor=white)](https://pypi.org/project/geatpy-rs/)
 [![Rust](https://img.shields.io/badge/rust-PyO3_abi3-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
