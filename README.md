@@ -1,6 +1,8 @@
 # **Geatpy (Rust Core Edition)**
 The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powered by Rust.
 
+[English](README.en.md) | **中文**
+
 [![CI](https://github.com/yangyachao/geatpy/actions/workflows/ci.yml/badge.svg)](https://github.com/yangyachao/geatpy/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/yangyachao/geatpy?color=blue&logo=github)](https://github.com/yangyachao/geatpy/releases)
 [![Python Version](https://img.shields.io/badge/python-3.8_~_3.15-blue.svg?logo=python&logoColor=white)](https://pypi.org/project/geatpy-rs/)

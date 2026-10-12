@@ -52,4 +52,5 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 - 性能优化只改实现、不改算法：每个基因/个体的概率与原版相同（例如 `mutbin` 用几何分布跳跃抽取变异位），改后用 fuzz 与
   `scripts/parity/classic.py` 确认分布与解质量不变。
 - 提交信息用英文 Conventional Commits；README 与设计文档用中文；Rust 注释用英文。
+- `README.en.md` 是 README 的英文版，改 README 时同步更新（版本号、数字、缺陷清单两边一致）。
 - `reverse/` 下的反编译内容不得提交或发布。
