@@ -966,7 +966,7 @@ fn unit_rows(x: &Array2<f64>) -> Array2<f64> {
 /// One entry of numpy `a @ b.T` for float64 matrices: OpenBLAS dgemm accumulates the products in
 /// order as a chain of fused multiply-adds starting from zero.
 fn dot_fma(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s))
+    crate::utils::dot_fma(a, b)
 }
 
 /// `f(a_i . b_k)` for every row of `a` and of `b` (dot products as in `dot_fma`), computed by rows
