@@ -39,7 +39,7 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 | **ABI 兼容性** | 每个 Python 小版本单独构建 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
 | **跨平台预编译** | Windows x86/x64、Linux x86_64、macOS（Apple Silicon 仅 Python 3.8 ~ 3.10），无 Linux ARM64 | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
 | **代码与内存安全** | 边界输入可能触发段错误，导致 Python 进程退出 | **纯安全 Rust（无 `unsafe`），非法输入抛出 Python 异常而非段错误** |
-| **多核并行与性能** | C OpenMP 并行 | 单线程实现（`Parallel` 参数为兼容保留，暂不生效）；36 个经典用例耗时为原版的 0.21~1.02 倍 |
+| **多核并行与性能** | C OpenMP 并行 | 非支配排序、参考点选择、距离与指标计算在大规模时自动多线程（结果与单线程逐位一致，`ea.set_num_threads()` / `GEATPY_NUM_THREADS` 设置线程数），其余算子单线程（`Parallel` 参数为兼容保留，不生效）；36 个经典用例耗时为原版的 0.21~1.02 倍 |
 | **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与 42 个算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
 
 ---

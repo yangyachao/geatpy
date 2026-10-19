@@ -45,7 +45,7 @@ Python 3.8 – 3.15.
 | **ABI** | One build per Python minor version | **PyO3 `abi3`: a single build for every Python 3.8+** |
 | **Prebuilt wheels** | Windows x86/x64, Linux x86_64, macOS (Apple Silicon only for Python 3.8 – 3.10); no Linux ARM64 | **Linux x86_64/ARM64, macOS Universal2, Windows x64** |
 | **Memory safety** | Edge-case input can segfault and kill the Python process | **Safe Rust only (no `unsafe`); invalid input raises a Python exception** |
-| **Parallelism & speed** | C OpenMP | Single-threaded (the `Parallel` argument is accepted for compatibility but has no effect); 0.21 – 1.02× the original's runtime on 36 benchmark cases |
+| **Parallelism & speed** | C OpenMP | Non-dominated sorting, reference-point selection, distances and indicators use several threads on large inputs (bit-identical to one thread; set the count with `ea.set_num_threads()` / `GEATPY_NUM_THREADS`), the other operators run on one thread (the `Parallel` argument is accepted for compatibility but has no effect); 0.21 – 1.02× the original's runtime on 36 benchmark cases |
 | **API compatibility** | Reference | **Same Python API, data structures and 42 algorithm templates; core behaviour verified against the official 2.7.0 binaries (see below)** |
 
 ---
