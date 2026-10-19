@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Regression tests for NaN (and Inf) inputs to the sorting operators.
+"""Regression tests for NaN (and Inf) inputs to the sorting operators and refselect.
 
 Rust's standard sort panics (PanicException) when a comparator is not a total order, which the old
 `partial_cmp(..).unwrap_or(Equal)` comparators were not once NaN appeared. The expected values below
 come from the original geatpy 2.7.0 binaries (macOS arm64 wheel, see scripts/parity/fuzz/README.md),
 so the file can be run against both cores.
 """
+import importlib.util
+
 import numpy as np
 import pytest
 
@@ -127,3 +129,91 @@ def test_gene_id_is_cast_to_int32(xov, gene_id, as_int):
         np.random.seed(seed)
         b = xov(chrom, 1.0, False, np.array(as_int, float))
         np.testing.assert_array_equal(a, b)
+
+
+# refselect normalises by the hyperplane through the extreme points, solved like geatpy 2.7.0 with
+# numpy (`det == 0` falls back to the column maxima). With NaN objectives the outcome depends on how
+# numpy's OpenBLAS picks LU pivots: a NaN never stays the running maximum of `idamax`, so an exact
+# zero can become the pivot (det == 0); past 8 rows a block holding NaN wins outright.
+def _refselect_bench(seed, with_nan):
+    rs = np.random.RandomState(seed)
+    o = rs.rand(40, 3)
+    if with_nan:
+        o[rs.rand(40, 3) < 0.1] = nan
+    return np.where(ea.refselect(o, np.r_[np.ones(25), 2 * np.ones(15)], 2, 30, ea.crtup(3, 20)[0]))[0].tolist()
+
+
+_FIRST_25 = list(range(25))
+
+
+@pytest.mark.parametrize('seed, chosen', [
+    (15, [25, 26, 29, 33, 36]), (61, [26, 29, 31, 33, 35]), (64, [26, 27, 28, 31, 35]),
+    (68, [25, 26, 27, 28, 29]),  # det is NaN: numpy solves to NaN intercepts
+    (77, [25, 29, 30, 31, 34]), (143, [27, 32, 33, 34, 39]), (175, [26, 30, 35, 37, 39]),
+    (178, [25, 27, 35, 36, 37]), (194, [25, 26, 27, 34, 35]),
+])
+def test_refselect_nan_objectives_follow_numpy_lu(seed, chosen):
+    assert _refselect_bench(seed, True) == _FIRST_25 + chosen
+
+
+def _refselect_fuzz_case(with_nan, t):
+    # the generator of the differential run these cases come from (scratch fuzz, seeds 10000 + t)
+    rs = np.random.RandomState(10000 + t)
+    m = int(rs.choice([2, 3, 3, 3, 4, 5, 8, 10, 12]))
+    n = int(rs.randint(6, 80))
+    style = t % 5
+    if style == 0:
+        o = rs.rand(n, m)
+    elif style == 1:
+        o = rs.randint(0, 6, (n, m)).astype(float)
+    elif style == 2:
+        o = rs.rand(n, m)
+        k = rs.randint(1, n)
+        o[rs.randint(0, n, k)] = o[rs.randint(0, n, k)]
+    elif style == 3:
+        o = np.round(rs.rand(n, m) * 4) / 4 * rs.choice([1, 100, 1e-3])
+    else:
+        o = rs.rand(n, m)
+        o[rs.rand(n, m) < 0.15] = 0.0
+    if with_nan:
+        o[rs.rand(n, m) < rs.choice([0.02, 0.1, 0.3])] = nan
+    if rs.rand() < 0.2:
+        o[rs.rand(n, m) < 0.05] = rs.choice([inf, -inf]) if with_nan else o.max()
+    n1 = int(rs.randint(0, n - 1))
+    n2 = int(rs.randint(2, n - n1 + 1))
+    levels = np.r_[np.ones(n1), 2 * np.ones(n2), 3 * np.ones(n - n1 - n2)]
+    need = int(rs.randint(n1 + 1, n1 + n2))
+    z = ea.crtup(m, {2: 12, 3: 20, 4: 30, 5: 40, 8: 60, 10: 80, 12: 100}[m])[0]
+    return o, levels, need, z
+
+
+@pytest.mark.parametrize('with_nan, t, chosen', [
+    # integer objectives: ties in 1 - cos^2 break like the original's normalise-then-matmul rounding
+    (False, 14588, [0]), (False, 3558, [0, 2]), (False, 1665, [0, 2, 4]),
+    (False, 13510, [0, 1, 2, 4]),  # 10 objectives, continuous
+    # NaN with 10-12 objectives: OpenBLAS idamax compares blocks of 8 by a NaN-propagating fmax
+    (True, 7214, [0, 1, 2, 3, 4, 5, 6]), (True, 18916, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 17]),
+    # det == 0 with a NaN in the first row: the column "maximum" starts from it and stays NaN
+    (True, 6717, [0, 1, 2, 3]), (True, 16331, [0, 4, 5, 7, 12]),
+])
+def test_refselect_fuzz_cases_match_original(with_nan, t, chosen):
+    o, levels, need, z = _refselect_fuzz_case(with_nan, t)
+    assert np.where(ea.refselect(o, levels, 2, need, z))[0].tolist() == chosen
+
+
+RUST_CORE = importlib.util.find_spec('_geatpy_core') is not None
+
+
+@pytest.mark.skipif(not RUST_CORE, reason='intentional difference from geatpy 2.7.0 (see AGENTS.md)')
+@pytest.mark.parametrize('seed, chosen, original', [
+    (131, [29, 31, 32, 34, 35], [25, 26, 27, 28, 31]),
+    (145, [26, 31, 33, 37, 38], [25, 26, 31, 33, 36]),
+    (194, [26, 31, 33, 36, 37], [25, 26, 27, 28, 37]),
+])
+def test_refselect_repeated_extreme_point_falls_back_to_column_maxima(seed, chosen, original):
+    # One individual is the extreme point of two objectives, so the extreme-point matrix is exactly
+    # singular. numpy's LU leaves a ~1e-17 pivot (det ~ 1e-19 != 0) and the original solves it into
+    # meaningless (even negative) intercepts; the Rust core detects the zero pivot and uses the
+    # column maxima, as the reference algorithm intends.
+    del original
+    assert _refselect_bench(seed, False) == _FIRST_25 + chosen

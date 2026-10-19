@@ -1,4 +1,4 @@
-use numpy::ndarray::{Array1, Array2};
+use numpy::ndarray::{Array1, Array2, ArrayView1};
 use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
@@ -825,19 +825,57 @@ fn cosine_matrix(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     c
 }
 
-/// Solve A x = rhs by Gaussian elimination with partial pivoting; None when A is singular.
+/// Index of the pivot `idamax` picks in `v`, as the OpenBLAS 0.3.x arm64 kernel (`iamax.S`) behind
+/// numpy's LAPACK does. For NaN-free input this is the first largest |v|. A NaN never survives as
+/// the running maximum of the element-wise scan: the next element replaces it, so an exact zero can
+/// become the pivot. Past 8 elements the kernel compares blocks of 8 by their `fmax` (NaN if any
+/// element is NaN, and such a block always wins), then takes the first element of the winning block
+/// equal to the maximum, or the block's first element when the maximum is NaN.
+fn openblas_iamax(v: &[f64]) -> usize {
+    // the kernel keeps its maximum on `fcmp max, x` + `ge`, which is false when either is NaN
+    let keeps = |mx: f64, x: f64| {
+        matches!(
+            mx.partial_cmp(&x),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        )
+    };
+    let (mut mx, mut idx) = (v[0].abs(), 0);
+    let blocks = (v.len() - 1) / 8;
+    for b in 0..blocks {
+        let blk = &v[1 + 8 * b..9 + 8 * b];
+        let t = if blk.iter().any(|x| x.is_nan()) {
+            f64::NAN
+        } else {
+            blk.iter().fold(0.0, |m: f64, x| m.max(x.abs()))
+        };
+        if !keeps(mx, t) {
+            (mx, idx) = (t, 1 + 8 * b);
+        }
+    }
+    if blocks > 0 {
+        let start = idx;
+        if let Some(q) = (start..start + 8).find(|&q| v[q].abs() == mx) {
+            idx = q;
+        }
+    }
+    for (r, x) in v.iter().enumerate().skip(1 + 8 * blocks) {
+        if !keeps(mx, x.abs()) {
+            (mx, idx) = (x.abs(), r);
+        }
+    }
+    idx
+}
+
+/// Solve A x = rhs by Gaussian elimination with partial pivoting; None when a pivot is exactly zero.
+/// Pivots are chosen like numpy's LAPACK (see `openblas_iamax`), so a NaN in A leads to the same
+/// zero pivot (geatpy 2.7.0: `det == 0`) or NaN solution as in the original. Dividing by the pivot
+/// (LAPACK multiplies by its reciprocal) keeps exactly duplicate rows exactly cancelling, so a
+/// singular A with repeated extreme points is reported as singular instead of solved from roundoff.
 fn solve_linear(mut a: Array2<f64>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
     let m = rhs.len();
     for col in 0..m {
-        // the last row with the largest |a| (as `max_by` picks it); NaN entries are skipped unless
-        // the first one is NaN, which then propagates to the solution
-        let piv = (col + 1..m).fold(col, |p, r| {
-            if a[[r, col]].abs() >= a[[p, col]].abs() {
-                r
-            } else {
-                p
-            }
-        });
+        let column: Vec<f64> = (col..m).map(|r| a[[r, col]]).collect();
+        let piv = col + openblas_iamax(&column);
         if a[[piv, col]] == 0.0 {
             return None;
         }
@@ -950,11 +988,11 @@ pub fn refselect<'py>(
         Some(h) => h,
         None => (0..m)
             .map(|j| {
-                let mx = c
-                    .column(j)
+                let col = c.column(j);
+                let mx = col
                     .iter()
-                    .cloned()
-                    .fold(f64::NEG_INFINITY, f64::max);
+                    .skip(1)
+                    .fold(col[0], |mx, &v| if v > mx { v } else { mx });
                 1.0 / if mx <= 1e-6 { mx + 1e-6 } else { mx }
             })
             .collect(),
@@ -962,15 +1000,33 @@ pub fn refselect<'py>(
     for (j, &scale) in intercept_scale.iter().enumerate() {
         c.column_mut(j).mapv_inplace(|v| v * scale);
     }
-    // association with the reference points
-    let cos = cosine_matrix(&c, &z);
+    // Association with the reference points, rounded like geatpy 2.7.0 so that ties (common with
+    // integer objectives) break the same way: rows are normalised first and multiplied with numpy
+    // `@` (an FMA chain in OpenBLAS), then each individual goes to the first reference point with
+    // the smallest 1 - cos^2, and d = sqrt(|c|^2 (1 - cos^2)) is NaN when roundoff makes it negative.
+    let sq_norm = |r: ArrayView1<f64>| r.iter().fold(0.0, |s, v| s + v * v);
+    let unit_rows = |x: &Array2<f64>| {
+        let mut u = x.clone();
+        for mut r in u.rows_mut() {
+            let norm = sq_norm(r.view()).sqrt();
+            r.mapv_inplace(|v| v / norm);
+        }
+        u
+    };
+    let (cu, zu) = (unit_rows(&c), unit_rows(&z));
     let mut pi = vec![0usize; rows.len()];
     let mut d = vec![0.0; rows.len()];
     for r in 0..rows.len() {
-        let norm2: f64 = c.row(r).iter().map(|v| v * v).sum();
-        let dist_to = |k: usize| (norm2 * (1.0 - cos[[r, k]] * cos[[r, k]])).max(0.0).sqrt();
-        let (best, dist) = (1..nz).fold((0, dist_to(0)), |b, k| {
-            let v = dist_to(k);
+        let one_minus_cos2 = |k: usize| {
+            let cos = cu
+                .row(r)
+                .iter()
+                .zip(zu.row(k).iter())
+                .fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s));
+            1.0 - cos * cos
+        };
+        let (best, cm) = (1..nz).fold((0, one_minus_cos2(0)), |b, k| {
+            let v = one_minus_cos2(k);
             if v < b.1 {
                 (k, v)
             } else {
@@ -978,7 +1034,7 @@ pub fn refselect<'py>(
             }
         });
         pi[r] = best;
-        d[r] = dist;
+        d[r] = (sq_norm(c.row(r)) * cm).sqrt();
     }
     let mut rho = vec![0usize; nz];
     for &p in &pi[..n1] {
