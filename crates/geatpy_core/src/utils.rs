@@ -32,7 +32,22 @@ fn as_float_array<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     )
 }
 
+/// Row-major (C order) copy of `a`, or `a` itself when it already is: numpy arrays in Fortran order
+/// (e.g. a transpose) keep that order when copied, and code reading rows as slices needs C order.
+fn standard<T: Clone>(a: Array2<T>) -> Array2<T> {
+    if a.is_standard_layout() {
+        a
+    } else {
+        a.as_standard_layout().into_owned()
+    }
+}
+
+/// A numeric matrix (1-D input becomes one column) as a row-major f64 array.
 pub fn to_f64_array2<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Array2<f64>> {
+    to_f64_matrix(obj).map(standard)
+}
+
+fn to_f64_matrix<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Array2<f64>> {
     if obj.is_none() {
         return Err(pyo3::exceptions::PyTypeError::new_err(
             "expected a numeric array, got None",
@@ -148,13 +163,14 @@ pub fn to_f64_array1<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Array1<f64>> {
     ))
 }
 
-/// An int32/int64 numpy matrix as i32 (chromosome values are small), or None for any other input.
+/// An int32/int64 numpy matrix as a row-major i32 array (chromosome values are small), or None for
+/// any other input.
 pub fn to_i32_array2(obj: &Bound<'_, PyAny>) -> Option<Array2<i32>> {
     if let Ok(ro) = obj.extract::<PyReadonlyArray2<i32>>() {
-        return Some(ro.as_array().to_owned());
+        return Some(standard(ro.as_array().to_owned()));
     }
     if let Ok(ro) = obj.extract::<PyReadonlyArray2<i64>>() {
-        return Some(ro.as_array().mapv(|x| x as i32));
+        return Some(standard(ro.as_array().mapv(|x| x as i32)));
     }
     None
 }
