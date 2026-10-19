@@ -963,28 +963,33 @@ fn unit_rows(x: &Array2<f64>) -> Array2<f64> {
     u
 }
 
-/// One entry of numpy `a @ b.T` for float64 matrices: OpenBLAS dgemm accumulates the products in
-/// order as a chain of fused multiply-adds starting from zero.
-fn dot_fma(a: &[f64], b: &[f64]) -> f64 {
-    crate::utils::dot_fma(a, b)
+/// Row `i` of numpy `a @ b.T` for float64 matrices (see `utils::dot_fma_rows`).
+fn matmul_row(a: &Array2<f64>, i: usize, b: &Array2<f64>, out: &mut [f64]) {
+    let x = a.row(i);
+    let x = x.as_slice().expect("owned arrays are contiguous");
+    let rows = b.as_slice().expect("owned arrays are contiguous");
+    crate::utils::dot_fma_rows(x, rows, out);
 }
 
-/// `f(a_i . b_k)` for every row of `a` and of `b` (dot products as in `dot_fma`), computed by rows
-/// on the thread pool when the matrix is large; every entry is computed independently, so the
-/// result does not depend on the number of threads.
+/// numpy's error for `a @ b.T` when `a` has `m` columns and `b` has `mb`, as geatpy 2.7.0 raises it.
+fn matmul_mismatch(mb: usize, m: usize) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "matmul: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature \
+         (n?,k),(k,m?)->(n?,m?) (size {mb} is different from {m})"
+    ))
+}
+
+/// `f` applied to every entry of numpy `a @ b.T` (rows as in `matmul_row`; `a` and `b` have the
+/// same number of columns), computed by rows on the thread pool when the matrix is large. Every
+/// row is computed independently, so the result does not depend on the number of threads.
 fn dot_matrix(a: &Array2<f64>, b: &Array2<f64>, f: impl Fn(f64) -> f64 + Sync) -> Array2<f64> {
     let (n, nb, d) = (a.shape()[0], b.shape()[0], a.shape()[1]);
     let mut out = Array2::<f64>::zeros((n, nb));
     let pool = crate::parallel::pool_for(n * nb * d, CDIST_PAR_MIN_WORK);
-    let (a, b) = (a.as_standard_layout(), b.as_standard_layout());
-    let (sa, sb) = (a.as_slice().unwrap(), b.as_slice().unwrap());
     let flat = out.as_slice_mut().expect("owned arrays are contiguous");
     crate::parallel::for_each_row(pool.as_deref(), flat, nb, |i, row| {
-        let x = &sa[i * d..(i + 1) * d];
-        for (k, o) in row.iter_mut().enumerate() {
-            let y = &sb[k * d..(k + 1) * d];
-            *o = f(dot_fma(x, y));
-        }
+        matmul_row(a, i, b, row);
+        row.iter_mut().for_each(|x| *x = f(*x));
     });
     out
 }
@@ -1194,18 +1199,14 @@ pub fn refselect<'py>(
     // `@` (an FMA chain in OpenBLAS), then each individual goes to the first reference point with
     // the smallest 1 - cos^2, and d = sqrt(|c|^2 (1 - cos^2)) is NaN when roundoff makes it negative.
     // Rows are independent, so they are associated in parallel when there are enough of them.
+    if z.shape()[1] != m {
+        return Err(matmul_mismatch(z.shape()[1], m));
+    }
     let (cu, zu) = (unit_rows(&c), unit_rows(&z));
-    let (scu, szu, mz) = (
-        cu.as_slice().unwrap(),
-        zu.as_slice().unwrap(),
-        zu.shape()[1],
-    );
     let assoc = |r: usize| -> (usize, f64) {
-        let x = &scu[r * m..(r + 1) * m];
-        let one_minus_cos2 = |k: usize| {
-            let cos = dot_fma(x, &szu[k * mz..(k + 1) * mz]);
-            1.0 - cos * cos
-        };
+        let mut cos = vec![0.0; nz];
+        matmul_row(&cu, r, &zu, &mut cos);
+        let one_minus_cos2 = |k: usize| 1.0 - cos[k] * cos[k];
         let (best, cm) = (1..nz).fold((0, one_minus_cos2(0)), |b, k| {
             let v = one_minus_cos2(k);
             if v < b.1 {
@@ -1293,7 +1294,7 @@ pub fn refgselect<'py>(
     crate::utils::unify_objectives(&mut obj, maxormins)?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
     // Rounded like geatpy 2.7.0 throughout: minima start from the first value and take only a
-    // strictly smaller one, cosines are normalised rows multiplied as numpy `@` (see `dot_fma`).
+    // strictly smaller one, cosines are normalised rows multiplied as numpy `@` (see `matmul_row`).
     for j in 0..m {
         let col = obj.column(j);
         let mn = col
@@ -1356,6 +1357,9 @@ pub fn refgselect<'py>(
                 .collect()
         }
     };
+    if v.shape()[1] != m {
+        return Err(matmul_mismatch(v.shape()[1], m));
+    }
     let ou = unit_rows(&obj);
     let norm: Vec<f64> = obj.rows().into_iter().map(|r| sq_norm(r).sqrt()).collect();
     // cosine distance 1 - cos; each individual goes to the first reference vector with the smallest

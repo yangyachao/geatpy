@@ -274,3 +274,18 @@ def test_refgselect_column_minimum_keeps_a_leading_nan():
     objv = np.array([[nan, 0.3], [0.2, 0.8], [0.6, 0.1], [0.4, 0.5]])
     flag, _ = ea.refgselect(objv, ea.crtup(2, 5)[0], 2.0)
     assert np.where(flag)[0].tolist() == [0]
+
+
+@pytest.mark.parametrize('width', [2, 4])
+@pytest.mark.parametrize('op', ['refselect', 'refgselect'])
+def test_reference_points_of_another_width_raise_numpy_value_error(op, width):
+    rs = np.random.RandomState(0)
+    objv = rs.rand(40, 3)
+    ref = rs.rand(10, width)
+    if op == 'refselect':
+        levels, cri = ea.ndsortESS(objv, 20)
+        call = lambda: ea.refselect(objv, levels, cri, 20, ref)
+    else:
+        call = lambda: ea.refgselect(objv, ref, 2.0)
+    with pytest.raises(ValueError, match=r'size %d is different from 3' % width):
+        call()

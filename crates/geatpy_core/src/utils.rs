@@ -183,28 +183,42 @@ pub fn cmp_nan_last(a: f64, b: f64) -> std::cmp::Ordering {
         .unwrap_or_else(|| a.is_nan().cmp(&b.is_nan()))
 }
 
-/// Dot product as a chain of fused multiply-adds starting from zero (what numpy's float64 `@`
-/// computes through OpenBLAS). x86_64 wheels target CPUs without FMA, where every `mul_add` is a
-/// call into the `fma` routine; on CPUs with FMA the same chain runs as hardware instructions,
-/// which round identically (once per step), so the result does not depend on the CPU.
-pub fn dot_fma(a: &[f64], b: &[f64]) -> f64 {
+/// `out[k]` = the dot product of `x` with row k of `rows` (row-major, `x.len()` columns), each a
+/// chain of fused multiply-adds starting from zero, `x[0] * row[0]` first: what numpy's float64 `@`
+/// computes through OpenBLAS. x86_64 wheels target CPUs without FMA, where every `mul_add` is a
+/// call into the software `fma` routine (correctly rounded, as IEEE 754 requires); on CPUs with FMA
+/// the loop runs as hardware instructions instead. Both round once per step, so the result does
+/// not depend on the CPU. The check runs once per call, so callers pass whole rows of products.
+pub fn dot_fma_rows(x: &[f64], rows: &[f64], out: &mut [f64]) {
+    assert_eq!(
+        rows.len(),
+        x.len() * out.len(),
+        "dot_fma_rows: shape mismatch"
+    );
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("fma") {
         // SAFETY: the CPU supports FMA
-        return unsafe { dot_fma_hw(a, b) };
+        return unsafe { dot_fma_rows_hw(x, rows, out) };
     }
-    dot_fma_chain(a, b)
+    dot_fma_rows_sw(x, rows, out)
 }
 
 #[inline(always)]
-fn dot_fma_chain(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s))
+fn dot_fma_rows_sw(x: &[f64], rows: &[f64], out: &mut [f64]) {
+    let d = x.len();
+    for (k, o) in out.iter_mut().enumerate() {
+        let row = &rows[k * d..(k + 1) * d];
+        *o = x
+            .iter()
+            .zip(row)
+            .fold(0.0, |s: f64, (p, q)| p.mul_add(*q, s));
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
-unsafe fn dot_fma_hw(a: &[f64], b: &[f64]) -> f64 {
-    dot_fma_chain(a, b)
+unsafe fn dot_fma_rows_hw(x: &[f64], rows: &[f64], out: &mut [f64]) {
+    dot_fma_rows_sw(x, rows, out)
 }
 
 /// Calls `f(k)` for every k in 0..total selected by independent Bernoulli(p) trials. Draws the
@@ -514,4 +528,73 @@ pub fn prepared_objectives(
         penalise_infeasible(&mut obj, &v);
     }
     Ok(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::SmallRng;
+    use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn dot_fma_rows_fuses_every_step_after_the_first() {
+        // a*a rounds away 2^-60, which the fused a*(-a) + round(a*a) recovers
+        let a = 1.0 + 2f64.powi(-30);
+        let mut out = [1.0];
+        dot_fma_rows(&[a, a], &[a, -a], &mut out);
+        assert_eq!(out[0], -(2f64.powi(-60)));
+        let mut sw = [1.0];
+        dot_fma_rows_sw(&[a, a], &[a, -a], &mut sw);
+        assert_eq!(sw[0], -(2f64.powi(-60)));
+    }
+
+    /// On CPUs with FMA only the hardware loop runs in the parity tests; this checks it against the
+    /// software `fma` chain that CPUs without FMA use, bit for bit.
+    #[test]
+    fn hardware_and_software_fma_dots_agree() {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("fma") {
+            let special = [
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                f64::MIN_POSITIVE,
+                5e-324,
+                f64::MAX,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+            ];
+            let mut rng = SmallRng::seed_from_u64(7);
+            let val = |rng: &mut SmallRng| {
+                if rng.gen_bool(0.1) {
+                    special[rng.gen_range(0..special.len())]
+                } else {
+                    let e = if rng.gen_bool(0.5) {
+                        rng.gen_range(-30..30)
+                    } else {
+                        rng.gen_range(-1074..1024)
+                    };
+                    rng.gen_range(-1.0..1.0) * 2f64.powi(e)
+                }
+            };
+            for d in 1..=8 {
+                for _ in 0..5000 {
+                    let x: Vec<f64> = (0..d).map(|_| val(&mut rng)).collect();
+                    let rows: Vec<f64> = (0..4 * d).map(|_| val(&mut rng)).collect();
+                    let (mut hw, mut sw) = ([0.0; 4], [0.0; 4]);
+                    // SAFETY: the CPU supports FMA
+                    unsafe { dot_fma_rows_hw(&x, &rows, &mut hw) };
+                    dot_fma_rows_sw(&x, &rows, &mut sw);
+                    for (h, s) in hw.iter().zip(&sw) {
+                        assert!(
+                            h.to_bits() == s.to_bits() || (h.is_nan() && s.is_nan()),
+                            "{x:?} . {rows:?}: {h:e} != {s:e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
