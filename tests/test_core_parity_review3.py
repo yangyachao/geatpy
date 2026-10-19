@@ -217,3 +217,60 @@ def test_refselect_repeated_extreme_point_falls_back_to_column_maxima(seed, chos
     # column maxima, as the reference algorithm intends.
     del original
     assert _refselect_bench(seed, False) == _FIRST_25 + chosen
+
+
+# refgselect follows the original's rounding: reference vectors and objectives are normalised first
+# and multiplied as numpy `@` (an FMA chain in OpenBLAS), individuals go to the smallest cosine
+# distance 1 - cos, Gamma is acos of the largest cosine without clamping, and APD uses acos(1 - d).
+_O1939 = [[4, 0], [0, 2], [2, 5], [2, 3], [3, 3], [4, 5], [5, 4], [1, 2], [4, 2], [2, 2], [1, 5], [5, 2], [3, 5],
+          [3, 0], [2, 3], [5, 2], [3, 5], [5, 0], [0, 1], [5, 4], [0, 3], [3, 2], [3, 2], [0, 5], [4, 0], [5, 2],
+          [4, 4], [2, 5], [4, 1], [5, 4], [1, 1]]
+_V1939 = [[0, 2], [2, 2], [2, 0], [1, 3], [1, 2], [2, 3], [2, 2], [2, 1], [1, 0], [3, 1], [3, 1], [2, 1], [1, 3],
+          [2, 0], [2, 2], [1, 2]]
+
+
+def test_refgselect_integer_ties_break_like_the_original():
+    with pytest.warns(RuntimeWarning, match='refgselect'):  # _V1939 repeats vectors
+        flag, _ = ea.refgselect(np.array(_O1939, float), np.array(_V1939, float), 0.5)
+    assert np.where(flag)[0].tolist() == [2, 3, 7, 8, 11, 13, 18, 30]
+
+
+_REFG_OBJV = np.array([[0.1, 0.9], [0.5, 0.5], [0.9, 0.1], [0.3, 0.6]])
+
+
+@pytest.mark.parametrize('v, gamma_hex, chosen, warns', [
+    # a repeated vector has cosine exactly 1: it is zeroed (with the original's warning) before the max
+    ([[1, 0], [1, 0], [0, 1]], ['0x1.921fb54442d18p+0'] * 3, [2, 3], 1),
+    ([[1, 3], [3, 9], [2, 1], [1, 0]], ['0x1.921fb54442d19p-1'] * 2 + ['0x1.dac670561bb50p-2'] * 2, [1, 2, 3], 1),
+    ([[0.1, 0.3], [0.3, 0.9], [1, 0]], ['0x1.3fc176b7a8560p+0'] * 3, [2, 3], 1),
+    # parallel vectors whose cosine rounds just below 1 keep a tiny angle and give no warning
+    ([[1, 1], [2, 2], [1, 0], [0, 1]], ['0x1.6a09e667f3bcdp-26'] * 2 + ['0x1.921fb54442d19p-1'] * 2, [0, 1, 2], 0),
+    ([[1, 2], [2, 4], [3, 1]], ['0x1.0000000000000p-26'] * 2 + ['0x1.921fb54442d18p-1'], [2, 3], 0),
+])
+def test_refgselect_gamma_for_repeated_reference_vectors(v, gamma_hex, chosen, warns):
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        flag, gamma = ea.refgselect(_REFG_OBJV, np.array(v, float), 2.0)
+    assert [float(g).hex() for g in gamma] == gamma_hex
+    assert np.where(flag)[0].tolist() == chosen
+    assert len([w for w in caught if 'refgselect' in str(w.message)]) == warns
+
+
+@pytest.mark.parametrize('cv, chosen', [
+    # negative entries count as 0 but NaN survives the sum and counts as infeasible (CV <= 1e-12
+    # fails); among infeasible members the first one stays unless a later one is strictly smaller
+    ([[nan], [0.5], [0.]], [0, 2]),
+    ([[0.5], [nan], [0.]], [0, 2]),
+    ([[-1., nan], [0., 0.], [0., 0.]], [1, 2]),
+])
+def test_refgselect_nan_violation_is_infeasible(cv, chosen):
+    objv = np.array([[0.2, 0.8], [0.25, 0.75], [0.9, 0.1]])
+    flag, _ = ea.refgselect(objv, ea.crtup(2, 3)[0], 2.0, np.array(cv))
+    assert np.where(flag)[0].tolist() == chosen
+
+
+def test_refgselect_column_minimum_keeps_a_leading_nan():
+    objv = np.array([[nan, 0.3], [0.2, 0.8], [0.6, 0.1], [0.4, 0.5]])
+    flag, _ = ea.refgselect(objv, ea.crtup(2, 5)[0], 2.0)
+    assert np.where(flag)[0].tolist() == [0]

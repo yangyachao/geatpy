@@ -35,6 +35,9 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
   解出无意义（甚至为负）的截距；Rust 用除法消元得到精确零主元，退回列最大值（随机 3 目标用例约 1.5%，
   8–12 目标更常见）。其余步骤按原版 arm64 轮子的舍入实现：LU 主元按 OpenBLAS `idamax`（含 NaN 时的行为）、
   余弦为先归一化再 FMA 点积、`1-cos²` 最小者关联、`d` 为负时 NaN；非奇异时求解的舍入仍可能不同（约 0.05%）。
+- `refgselect` 同样按原版舍入实现，与官方逐位一致（含 Gamma）：余弦距离 `1-cos` 最小者关联、Gamma 为 `acos`
+  （不 clamp，值等于 1 的余弦先置 0 并发出原版的 RuntimeWarning）、APD 用 `acos(1-d)`；CV 负值置 0 后按 numpy 求和，
+  NaN 保留并按 arm64 原版视为不可行（x86 反编译的 `1e-12 < CV` 写法看不出这一点）。
 - `rws` 先把 FitnV 平移到非负；`crowdis` 接受 `levels=None`；HV 在 M=4 时用精确算法（原版蒙特卡洛）。
 - 有意更宽松（原版报错）：`maxormins` 接受 list；'P' 编码的 mutinv/mutmove/mutswap 不强制 FieldDR；一维输入；
   整数参数（Half_N、Nind 等）接受 numpy 整数（原版只认 Python int）。

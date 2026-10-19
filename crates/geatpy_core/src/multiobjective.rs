@@ -802,27 +802,49 @@ pub fn rwGA<'py>(
     Ok(out.into_pyarray(py))
 }
 
-fn cosine_matrix(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
-    let norm = |x: &Array2<f64>| -> Vec<f64> {
-        x.rows()
-            .into_iter()
-            .map(|r| r.iter().map(|v| v * v).sum::<f64>().sqrt())
-            .collect()
-    };
-    let (na, nb) = (norm(a), norm(b));
-    let mut c = Array2::<f64>::zeros((a.shape()[0], b.shape()[0]));
-    for i in 0..a.shape()[0] {
-        for j in 0..b.shape()[0] {
-            let dot: f64 = a
-                .row(i)
-                .iter()
-                .zip(b.row(j).iter())
-                .map(|(x, y)| x * y)
-                .sum();
-            c[[i, j]] = dot / (na[i] * nb[j]);
-        }
+/// Sum of squares of a row, accumulated left to right like the original C loops.
+fn sq_norm(r: ArrayView1<f64>) -> f64 {
+    r.iter().fold(0.0, |s, v| s + v * v)
+}
+
+/// Rows divided by their Euclidean norm (geatpy 2.7.0 `_matrix_normalize`).
+fn unit_rows(x: &Array2<f64>) -> Array2<f64> {
+    let mut u = x.clone();
+    for mut r in u.rows_mut() {
+        let norm = sq_norm(r.view()).sqrt();
+        r.mapv_inplace(|v| v / norm);
     }
-    c
+    u
+}
+
+/// One entry of numpy `a @ b.T` for float64 matrices: OpenBLAS dgemm accumulates the products in
+/// order as a chain of fused multiply-adds starting from zero.
+fn dot_fma(a: ArrayView1<f64>, b: ArrayView1<f64>) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s))
+}
+
+/// numpy's float64 `np.sum` along a contiguous axis (pairwise summation with 8 accumulators).
+fn numpy_pairwise_sum(a: &[f64]) -> f64 {
+    let n = a.len();
+    if n < 8 {
+        a.iter().fold(0.0, |s, &x| s + x)
+    } else if n <= 128 {
+        let mut r = [0.0; 8];
+        r.copy_from_slice(&a[..8]);
+        let full = n - n % 8;
+        for i in (8..full).step_by(8) {
+            for j in 0..8 {
+                r[j] += a[i + j];
+            }
+        }
+        let res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+        a[full..].iter().fold(res, |s, &x| s + x)
+    } else {
+        let half = n / 2 - (n / 2) % 8;
+        numpy_pairwise_sum(&a[..half]) + numpy_pairwise_sum(&a[half..])
+    }
 }
 
 /// Index of the pivot `idamax` picks in `v`, as the OpenBLAS 0.3.x arm64 kernel (`iamax.S`) behind
@@ -1004,25 +1026,12 @@ pub fn refselect<'py>(
     // integer objectives) break the same way: rows are normalised first and multiplied with numpy
     // `@` (an FMA chain in OpenBLAS), then each individual goes to the first reference point with
     // the smallest 1 - cos^2, and d = sqrt(|c|^2 (1 - cos^2)) is NaN when roundoff makes it negative.
-    let sq_norm = |r: ArrayView1<f64>| r.iter().fold(0.0, |s, v| s + v * v);
-    let unit_rows = |x: &Array2<f64>| {
-        let mut u = x.clone();
-        for mut r in u.rows_mut() {
-            let norm = sq_norm(r.view()).sqrt();
-            r.mapv_inplace(|v| v / norm);
-        }
-        u
-    };
     let (cu, zu) = (unit_rows(&c), unit_rows(&z));
     let mut pi = vec![0usize; rows.len()];
     let mut d = vec![0.0; rows.len()];
     for r in 0..rows.len() {
         let one_minus_cos2 = |k: usize| {
-            let cos = cu
-                .row(r)
-                .iter()
-                .zip(zu.row(k).iter())
-                .fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s));
+            let cos = dot_fma(cu.row(r), zu.row(k));
             1.0 - cos * cos
         };
         let (best, cm) = (1..nz).fold((0, one_minus_cos2(0)), |b, k| {
@@ -1097,44 +1106,86 @@ pub fn refgselect<'py>(
     let mut obj = crate::utils::to_f64_array2(obj_v)?;
     crate::utils::unify_objectives(&mut obj, maxormins)?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
+    // Rounded like geatpy 2.7.0 throughout: minima start from the first value and take only a
+    // strictly smaller one, cosines are normalised rows multiplied as numpy `@` (see `dot_fma`).
     for j in 0..m {
-        let mn = obj.column(j).iter().cloned().fold(f64::INFINITY, f64::min);
+        let col = obj.column(j);
+        let mn = col
+            .iter()
+            .skip(1)
+            .fold(col[0], |mn, &v| if v < mn { v } else { mn });
         obj.column_mut(j).mapv_inplace(|v| v - mn);
     }
     let v = crate::utils::to_f64_array2(ref_point)?;
     let nv = v.shape()[0];
-    let viol = crate::utils::violation(cv, n)?.unwrap_or_else(|| vec![0.0; n]);
+    let vu = unit_rows(&v);
+    // Total violation as the original computes it: negative entries set to 0, then `np.sum(_, 1)`,
+    // so a NaN stays NaN (and counts as infeasible below).
+    let viol: Vec<f64> = match cv {
+        Some(c) if !c.is_none() => {
+            let a = crate::utils::to_f64_array2(c)?;
+            if a.shape()[0] != n {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "error: CV and ObjV disagree in number of rows.",
+                ));
+            }
+            a.rows()
+                .into_iter()
+                .map(|r| {
+                    let r: Vec<f64> = r.iter().map(|&x| if x < 0.0 { 0.0 } else { x }).collect();
+                    numpy_pairwise_sum(&r)
+                })
+                .collect()
+        }
+        _ => vec![0.0; n],
+    };
     let gamma: Vec<f64> = match gamma {
         Some(g) if !g.is_none() => crate::utils::to_f64_array1(g)?.to_vec(),
         _ => {
-            let mut cvv = cosine_matrix(&v, &v);
+            // cosine between reference vectors with the diagonal zeroed; an exact 1 (a repeated
+            // vector) is zeroed too, with the original's warning
+            let mut cvv = Array2::<f64>::zeros((nv, nv));
             for i in 0..nv {
-                cvv[[i, i]] = 0.0;
+                for k in 0..nv {
+                    cvv[[i, k]] = if i == k {
+                        0.0
+                    } else {
+                        dot_fma(vu.row(i), vu.row(k))
+                    };
+                }
             }
+            if cvv.iter().any(|&x| x == 1.0) {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyRuntimeWarning>(),
+                    c"Warning in refgselect: Some reference points are so close to the original point.(部分参考点过于接近坐标原点，此时将受到浮点精度限制的影响。)",
+                    1,
+                )?;
+                cvv.mapv_inplace(|x| if x == 1.0 { 0.0 } else { x });
+            }
+            // the largest cosine (first value, then strictly larger ones) and its angle; acos is not
+            // clamped, so a cosine rounded above 1 gives NaN as in the original
             (0..nv)
                 .map(|i| {
-                    cvv.row(i)
-                        .iter()
-                        .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
-                        .clamp(-1.0, 1.0)
+                    let row = cvv.row(i);
+                    row.iter()
+                        .skip(1)
+                        .fold(row[0], |mx, &x| if x > mx { x } else { mx })
                         .acos()
                 })
                 .collect()
         }
     };
-    let cos = cosine_matrix(&obj, &v);
-    let norm: Vec<f64> = obj
-        .rows()
-        .into_iter()
-        .map(|r| r.iter().map(|x| x * x).sum::<f64>().sqrt())
-        .collect();
+    let ou = unit_rows(&obj);
+    let norm: Vec<f64> = obj.rows().into_iter().map(|r| sq_norm(r).sqrt()).collect();
+    // cosine distance 1 - cos; each individual goes to the first reference vector with the smallest
+    let cos_dist = Array2::from_shape_fn((n, nv), |(i, k)| 1.0 - dot_fma(ou.row(i), vu.row(k)));
     let assoc: Vec<usize> = (0..n)
         .map(|i| {
-            (0..nv)
-                .fold((0, f64::NEG_INFINITY), |b, k| {
-                    if cos[[i, k]] > b.1 {
-                        (k, cos[[i, k]])
+            (1..nv)
+                .fold((0, cos_dist[[i, 0]]), |b, k| {
+                    if cos_dist[[i, k]] < b.1 {
+                        (k, cos_dist[[i, k]])
                     } else {
                         b
                     }
@@ -1173,7 +1224,7 @@ pub fn refgselect<'py>(
         };
         let best = if !feasible.is_empty() {
             let w = p_theta / gamma[k];
-            let apd = |i: usize| (w * cos[[i, k]].clamp(-1.0, 1.0).acos() + 1.0) * norm[i];
+            let apd = |i: usize| (w * (1.0 - cos_dist[[i, k]]).acos() + 1.0) * norm[i];
             first_strictly_best(&feasible, &apd)
         } else {
             first_strictly_best(&members, &|i: usize| viol[i])
