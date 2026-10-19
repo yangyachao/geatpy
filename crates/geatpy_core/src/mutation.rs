@@ -440,13 +440,22 @@ fn flip_positions(total: usize, d: usize, pm: &[f64]) -> Vec<usize> {
     hits
 }
 
-/// Draw without replacement from `pool`; falls back to any index when the pool is exhausted.
-fn draw<R: Rng>(pool: &mut Vec<usize>, n: usize, rng: &mut R) -> usize {
-    if pool.is_empty() {
+/// Draws a donor index from 0..n uniformly without replacement (`taken` holds the earlier draws),
+/// never `skip`; once every candidate is taken, any index is returned. Rejection sampling keeps
+/// each draw O(1) (a candidate pool of length n per individual made mutde O(n^2)) with the same
+/// distribution as drawing from that pool.
+fn draw<R: Rng>(taken: &mut Vec<usize>, skip: Option<usize>, n: usize, rng: &mut R) -> usize {
+    let candidates = n - usize::from(skip.is_some());
+    if taken.len() >= candidates {
         return rng.gen_range(0..n);
     }
-    let k = rng.gen_range(0..pool.len());
-    pool.swap_remove(k)
+    loop {
+        let k = rng.gen_range(0..n);
+        if Some(k) != skip && !taken.contains(&k) {
+            taken.push(k);
+            return k;
+        }
+    }
 }
 
 enum Xr {
@@ -583,12 +592,13 @@ pub fn mutde<'py>(
     // Trial values of row i on `cols`, with freshly drawn donors and F (the target row is excluded
     // from the donors when one offspring is produced per individual).
     let trial = |i: usize, cols: &[usize], rng: &mut rand::rngs::SmallRng| -> Vec<f64> {
-        let mut pool: Vec<usize> = (0..n).filter(|&k| !(rows == n && k == i)).collect();
+        let skip = (rows == n).then_some(i);
+        let mut taken = Vec::with_capacity(1 + 2 * pairs);
         let vecs: Vec<Vec<f64>> = xrs
             .iter()
             .take(1 + 2 * pairs)
             .map(|x| match x {
-                Xr::Random => chrom.row(draw(&mut pool, n, rng)).to_vec(),
+                Xr::Random => chrom.row(draw(&mut taken, skip, n, rng)).to_vec(),
                 Xr::Index(idx) => chrom.row(idx[i]).to_vec(),
                 Xr::Vector(v) => v.row(i).to_vec(),
             })
