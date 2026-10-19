@@ -1,6 +1,7 @@
-use numpy::ndarray::{Array1, Array2};
+use numpy::ndarray::{Array1, Array2, ArrayView1};
 use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
+use pyo3::types::IntoPyDict;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
@@ -9,7 +10,7 @@ fn ndsort_wrapper<'py>(
     obj_v: &Bound<'py, PyAny>,
     args: &Bound<'py, pyo3::types::PyTuple>,
     kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
-    dedup: bool,
+    tree: bool,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
     let mut need_sort: Option<usize> = None;
     let mut need_level: Option<usize> = None;
@@ -72,7 +73,7 @@ fn ndsort_wrapper<'py>(
         need_sort,
         cv,
         maxormins_any.as_ref(),
-        dedup,
+        tree,
     )
 }
 
@@ -97,7 +98,7 @@ pub fn ndsortTNS<'py>(
     args: &Bound<'py, pyo3::types::PyTuple>,
     kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
-    ndsort_wrapper(py, obj_v, args, kwargs, false)
+    ndsort_wrapper(py, obj_v, args, kwargs, true)
 }
 
 /// Non-dominated Sort with Deduplication
@@ -109,7 +110,7 @@ pub fn ndsortDED<'py>(
     args: &Bound<'py, pyo3::types::PyTuple>,
     kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
-    ndsort_wrapper(py, obj_v, args, kwargs, true)
+    ndsort_wrapper(py, obj_v, args, kwargs, false)
 }
 
 /// Most unranked rows a front pass handles at a time: the serial head that estimates the front
@@ -222,7 +223,7 @@ fn ndsort_core<'py>(
     need_num: Option<usize>,
     cv: Option<Array2<f64>>,
     maxormins: Option<&Bound<'py, PyAny>>,
-    _dedup: bool,
+    tree: bool,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
     let n = raw_obj.shape()[0];
     let m = raw_obj.shape()[1];
@@ -258,9 +259,15 @@ fn ndsort_core<'py>(
 
     // Constraint domination: an infeasible individual gets (column maximum + total violation)
     // on every objective, so feasible ones dominate it and infeasible ones compare by violation.
+    // The column maximum is taken like geatpy 2.7.0: start from the first row and keep any larger
+    // value, so a NaN in the first row stays the maximum and later NaNs are skipped.
     if let Some(c) = cv {
         let col_max: Vec<f64> = (0..m)
-            .map(|j| obj.iter().map(|r| r[j]).fold(f64::NEG_INFINITY, f64::max))
+            .map(|j| {
+                obj[1..]
+                    .iter()
+                    .fold(obj[0][j], |mx, r| if r[j] > mx { r[j] } else { mx })
+            })
             .collect();
         for (row, viol) in obj.iter_mut().zip(c.rows()) {
             let s: f64 = viol.iter().filter(|&&x| x > 0.0).sum();
@@ -272,44 +279,37 @@ fn ndsort_core<'py>(
         }
     }
 
-    // Unique rows in lexicographic order, with multiplicities.
-    let mut order: Vec<usize> = (0..n).collect();
-    let lex = |a: &Vec<f64>, b: &Vec<f64>| {
-        for j in 0..m {
-            match a[j].partial_cmp(&b[j]) {
-                Some(std::cmp::Ordering::Equal) | None => continue,
-                Some(o) => return o,
-            }
-        }
-        std::cmp::Ordering::Equal
+    // Unique rows in lexicographic order, with multiplicities and the row -> unique map.
+    let has_nan = obj.iter().flatten().any(|x| x.is_nan());
+    let (uobj, rep, inverse) = if has_nan {
+        numpy_unique_rows(py, &obj)?
+    } else {
+        unique_rows(&obj)
     };
-    order.sort_by(|&a, &b| lex(&obj[a], &obj[b]));
-    let mut uni: Vec<usize> = Vec::new(); // representative row of each unique vector
-    let mut rep: Vec<usize> = Vec::new();
-    let mut inverse = vec![0usize; n];
-    for &i in &order {
-        match uni.last() {
-            Some(&u) if lex(&obj[u], &obj[i]) == std::cmp::Ordering::Equal => {
-                *rep.last_mut().unwrap() += 1;
-            }
-            _ => {
-                uni.push(i);
-                rep.push(1);
-            }
-        }
-        inverse[i] = uni.len() - 1;
-    }
 
-    // Objectives 2..M of the unique rows, contiguous and in sorted order (the first objective
-    // only orders the rows).
-    let w = m.saturating_sub(1);
-    let pts: Vec<f64> = uni
-        .iter()
-        .flat_map(|&r| obj[r].iter().skip(1).copied())
-        .collect();
     let nums = need_num.unwrap_or(n);
     let max_level = need_level.unwrap_or(n);
-    let (lv, cri_level) = py.allow_threads(|| front_levels(&pts, w, &rep, n, nums, max_level));
+    let (lv, cri_level) = if !has_nan {
+        // objectives 2..M of the unique rows, contiguous (the first one only orders the rows)
+        let w = m.saturating_sub(1);
+        let pts: Vec<f64> = uobj
+            .chunks(m.max(1))
+            .flat_map(|r| r.iter().skip(1).copied())
+            .collect();
+        py.allow_threads(|| front_levels(&pts, w, &rep, n, nums, max_level))
+    } else if tree {
+        tens_levels(
+            &uobj,
+            m,
+            &objective_ranks(py, &uobj, m)?,
+            &rep,
+            n,
+            nums,
+            max_level,
+        )
+    } else {
+        ens_levels(&uobj, m, &rep, n, nums, max_level)
+    };
 
     let levels = Array1::from_iter((0..n).map(|i| {
         let l = lv[inverse[i]];
@@ -320,6 +320,236 @@ fn ndsort_core<'py>(
         }
     }));
     Ok((levels.into_pyarray(py), cri_level))
+}
+
+/// Unique rows (row-major, M values each), the multiplicity of each and the unique row of every
+/// input row.
+type UniqueRows = (Vec<f64>, Vec<usize>, Vec<usize>);
+
+/// Unique rows of NaN-free objectives (sorted lexicographically), their multiplicities and the
+/// index of every row's unique vector.
+fn unique_rows(obj: &[Vec<f64>]) -> UniqueRows {
+    let n = obj.len();
+    let lex = |a: &[f64], b: &[f64]| {
+        for (&x, &y) in a.iter().zip(b) {
+            let o = crate::utils::cmp_nan_last(x, y);
+            if o.is_ne() {
+                return o;
+            }
+        }
+        std::cmp::Ordering::Equal
+    };
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| lex(&obj[a], &obj[b]));
+    let mut uobj: Vec<f64> = Vec::with_capacity(n * obj.first().map_or(0, |r| r.len()));
+    let mut last: Option<usize> = None; // representative row of the current unique vector
+    let mut rep: Vec<usize> = Vec::new();
+    let mut inverse = vec![0usize; n];
+    for &i in &order {
+        match last {
+            Some(u) if lex(&obj[u], &obj[i]).is_eq() => {
+                *rep.last_mut().unwrap() += 1;
+            }
+            _ => {
+                last = Some(i);
+                uobj.extend_from_slice(&obj[i]);
+                rep.push(1);
+            }
+        }
+        inverse[i] = rep.len() - 1;
+    }
+    (uobj, rep, inverse)
+}
+
+/// `np.unique(ObjV, axis=0, return_inverse=True, return_counts=True)`, which geatpy 2.7.0 runs
+/// before sorting; used when the objectives contain NaN. numpy sorts NaN after every number, never
+/// merges two rows holding NaN, and orders such rows that compare equal by its unstable quicksort,
+/// which decides which of them lands on which front.
+fn numpy_unique_rows(py: Python<'_>, obj: &[Vec<f64>]) -> PyResult<UniqueRows> {
+    let (n, m) = (obj.len(), obj[0].len());
+    let arr = Array2::from_shape_fn((n, m), |(i, j)| obj[i][j]).into_pyarray(py);
+    let kwargs = [("return_inverse", true), ("return_counts", true)].into_py_dict(py)?;
+    kwargs.set_item("axis", 0)?;
+    let res = py
+        .import("numpy")?
+        .call_method("unique", (arr,), Some(&kwargs))?;
+    let uni = crate::utils::to_f64_array2(&res.get_item(0)?)?;
+    let inverse: Vec<usize> = res
+        .get_item(1)?
+        .call_method0("ravel")?
+        .call_method0("tolist")?
+        .extract()?;
+    let counts: Vec<usize> = res.get_item(2)?.call_method0("tolist")?.extract()?;
+    Ok((uni.iter().cloned().collect(), counts, inverse))
+}
+
+/// Efficient non-dominated sort (ENS-SS) over unique rows sorted lexicographically, one complete
+/// front per pass, compared exactly as geatpy 2.7.0 does. Returns the front of every unique row
+/// (0 = unranked) and the last front built. Used for NaN input only: without NaN it gives the same
+/// fronts as the faster `front_levels`.
+fn ens_levels(
+    uobj: &[f64],
+    m: usize,
+    rep: &[usize],
+    n: usize,
+    nums: usize,
+    max_level: usize,
+) -> (Vec<usize>, usize) {
+    let u = rep.len();
+    let mut lv = vec![0usize; u];
+    let mut cri_level = 0usize;
+    let mut sums = 0usize;
+    if nums > 0 {
+        loop {
+            cri_level += 1;
+            if cri_level > max_level {
+                break;
+            }
+            for i in 0..u {
+                if lv[i] != 0 {
+                    continue;
+                }
+                // Rows are sorted on the first objective, so only earlier rows of this front can
+                // dominate row i; uniqueness turns weak dominance into dominance. With two
+                // objectives the nearest earlier member of the front has the smallest second
+                // objective, so geatpy 2.7.0 compares with it alone (this matters only for NaN).
+                let dominated = if m == 2 {
+                    lv[..i]
+                        .iter()
+                        .rposition(|&l| l == cri_level)
+                        .is_some_and(|j| uobj[j * 2 + 1] <= uobj[i * 2 + 1])
+                } else {
+                    (0..i).rev().any(|j| {
+                        lv[j] == cri_level && (1..m).all(|k| uobj[j * m + k] <= uobj[i * m + k])
+                    })
+                };
+                if !dominated {
+                    lv[i] = cri_level;
+                    sums += rep[i];
+                }
+            }
+            if sums >= nums || sums >= n {
+                break;
+            }
+        }
+    }
+    (lv, cri_level)
+}
+
+/// For T-ENS: the columns 1..M of every unique row ordered from its worst objective to its best,
+/// as geatpy 2.7.0 computes them (`np.argsort(-ObjV[:, 1:], 1) + 1`, NaN last).
+fn objective_ranks(py: Python<'_>, uobj: &[f64], m: usize) -> PyResult<Vec<Vec<usize>>> {
+    let u = uobj.len() / m;
+    if m < 2 {
+        return Ok(vec![Vec::new(); u]);
+    }
+    let neg = Array2::from_shape_fn((u, m - 1), |(i, k)| -uobj[i * m + k + 1]).into_pyarray(py);
+    let ranks: Vec<Vec<usize>> = py
+        .import("numpy")?
+        .call_method1("argsort", (neg, 1))?
+        .call_method0("tolist")?
+        .extract()?;
+    Ok(ranks
+        .into_iter()
+        .map(|r| r.into_iter().map(|c| c + 1).collect())
+        .collect())
+}
+
+/// Tree-based ENS (T-ENS, Zhang et al. 2018) as geatpy 2.7.0's ndsortTNS runs it. Without NaN it
+/// gives the same fronts as `ens_levels`; with NaN its comparisons decide differently, so it is
+/// used for NaN input only. Each front is a tree rooted at its first unranked row; a candidate p
+/// is compared with node q on q's objectives from worst to best and skips the subtrees that
+/// cannot dominate it.
+#[allow(clippy::too_many_arguments)]
+fn tens_levels(
+    uobj: &[f64],
+    m: usize,
+    orank: &[Vec<usize>],
+    rep: &[usize],
+    n: usize,
+    nums: usize,
+    max_level: usize,
+) -> (Vec<usize>, usize) {
+    const NONE: usize = usize::MAX;
+    let u = rep.len();
+    let m1 = orank.first().map_or(0, |r| r.len());
+    let mut lv = vec![0usize; u];
+    let mut left_child = vec![m1; u];
+    let mut father = vec![NONE; u];
+    let mut brother = vec![m1; u];
+    let mut children = vec![vec![NONE; m1]; u];
+    let mut pruning = vec![0usize; u];
+    let mut cri_level = 0usize;
+    let mut sums = 0usize;
+    if nums == 0 {
+        return (lv, cri_level);
+    }
+    loop {
+        cri_level += 1;
+        if cri_level > max_level {
+            break;
+        }
+        let Some(root) = lv.iter().position(|&l| l == 0) else {
+            break;
+        };
+        lv[root] = cri_level;
+        sums += rep[root];
+        for p in 0..u {
+            if lv[p] != 0 {
+                continue;
+            }
+            pruning.fill(0);
+            let mut q = root;
+            let dominated = loop {
+                // first of q's objectives (worst first) on which q is not <= p
+                let k = orank[q]
+                    .iter()
+                    .take_while(|&&c| uobj[q * m + c] <= uobj[p * m + c])
+                    .count();
+                if k == m1 {
+                    break true;
+                }
+                pruning[q] = k;
+                if left_child[q] <= k {
+                    q = children[q][left_child[q]];
+                    continue;
+                }
+                while father[q] != NONE && brother[q] > pruning[father[q]] {
+                    q = father[q];
+                }
+                if father[q] == NONE {
+                    break false;
+                }
+                q = children[father[q]][brother[q]];
+            };
+            if dominated {
+                continue;
+            }
+            lv[p] = cri_level;
+            sums += rep[p];
+            let mut q = root;
+            while children[q][pruning[q]] != NONE {
+                q = children[q][pruning[q]];
+            }
+            children[q][pruning[q]] = p;
+            father[p] = q;
+            if left_child[q] > pruning[q] {
+                brother[p] = left_child[q];
+                left_child[q] = pruning[q];
+            } else {
+                let mut bro = children[q][left_child[q]];
+                while brother[bro] < pruning[q] {
+                    bro = children[q][brother[bro]];
+                }
+                brother[p] = brother[bro];
+                brother[bro] = pruning[q];
+            }
+        }
+        if sums >= nums || sums >= n {
+            break;
+        }
+    }
+    (lv, cri_level)
 }
 
 /// Crowding distance (NSGA-II). Unranked individuals (level Inf) get 0; boundary points get Inf.
@@ -360,19 +590,18 @@ pub fn crowdis<'py>(
         }
         for j in 0..m {
             let mut sorted = members.clone();
-            sorted.sort_by(|&a, &b| {
-                obj[[a, j]]
-                    .partial_cmp(&obj[[b, j]])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // stable, NaN last: geatpy 2.7.0 uses np.argsort(kind='mergesort')
+            sorted.sort_by(|&a, &b| crate::utils::cmp_nan_last(obj[[a, j]], obj[[b, j]]));
             let (first, last) = (sorted[0], sorted[count - 1]);
             let span = obj[[last, j]] - obj[[first, j]] + 1e-6;
             for k in 1..count - 1 {
                 let cur = sorted[k];
                 dist[cur] += (obj[[sorted[k + 1], j]] - obj[[sorted[k - 1], j]]) / span;
             }
-            dist[first] = f64::INFINITY;
-            dist[last] = f64::INFINITY;
+            // geatpy 2.7.0 sums the per-objective terms with Inf for the boundary points, so a NaN
+            // term from another objective keeps a boundary point at NaN
+            dist[first] += f64::INFINITY;
+            dist[last] += f64::INFINITY;
         }
     }
     Ok(dist.into_pyarray(py))
@@ -719,37 +948,120 @@ pub fn rwGA<'py>(
     Ok(out.into_pyarray(py))
 }
 
-fn cosine_matrix(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
-    let norm = |x: &Array2<f64>| -> Vec<f64> {
-        x.rows()
-            .into_iter()
-            .map(|r| r.iter().map(|v| v * v).sum::<f64>().sqrt())
-            .collect()
-    };
-    let (na, nb) = (norm(a), norm(b));
-    let mut c = Array2::<f64>::zeros((a.shape()[0], b.shape()[0]));
-    let pool = crate::parallel::pool_for(c.len() * a.shape()[1], CDIST_PAR_MIN_WORK);
-    let (a, b) = (a.as_standard_layout(), b.as_standard_layout());
-    let (sa, sb) = (a.as_slice().unwrap(), b.as_slice().unwrap());
-    let d = a.shape()[1];
-    let flat = c.as_slice_mut().expect("owned arrays are contiguous");
-    crate::parallel::for_each_row(pool.as_deref(), flat, b.shape()[0], |i, row| {
-        let x = &sa[i * d..(i + 1) * d];
-        for (j, out) in row.iter_mut().enumerate() {
-            let y = &sb[j * d..(j + 1) * d];
-            let dot: f64 = x.iter().zip(y).map(|(p, q)| p * q).sum();
-            *out = dot / (na[i] * nb[j]);
-        }
-    });
-    c
+/// Sum of squares of a row, accumulated left to right like the original C loops.
+fn sq_norm(r: ArrayView1<f64>) -> f64 {
+    r.iter().fold(0.0, |s, v| s + v * v)
 }
 
-/// Solve A x = rhs by Gaussian elimination with partial pivoting; None when A is singular.
+/// Rows divided by their Euclidean norm (geatpy 2.7.0 `_matrix_normalize`).
+fn unit_rows(x: &Array2<f64>) -> Array2<f64> {
+    let mut u = x.clone();
+    for mut r in u.rows_mut() {
+        let norm = sq_norm(r.view()).sqrt();
+        r.mapv_inplace(|v| v / norm);
+    }
+    u
+}
+
+/// One entry of numpy `a @ b.T` for float64 matrices: OpenBLAS dgemm accumulates the products in
+/// order as a chain of fused multiply-adds starting from zero.
+fn dot_fma(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s))
+}
+
+/// `f(a_i . b_k)` for every row of `a` and of `b` (dot products as in `dot_fma`), computed by rows
+/// on the thread pool when the matrix is large; every entry is computed independently, so the
+/// result does not depend on the number of threads.
+fn dot_matrix(a: &Array2<f64>, b: &Array2<f64>, f: impl Fn(f64) -> f64 + Sync) -> Array2<f64> {
+    let (n, nb, d) = (a.shape()[0], b.shape()[0], a.shape()[1]);
+    let mut out = Array2::<f64>::zeros((n, nb));
+    let pool = crate::parallel::pool_for(n * nb * d, CDIST_PAR_MIN_WORK);
+    let (a, b) = (a.as_standard_layout(), b.as_standard_layout());
+    let (sa, sb) = (a.as_slice().unwrap(), b.as_slice().unwrap());
+    let flat = out.as_slice_mut().expect("owned arrays are contiguous");
+    crate::parallel::for_each_row(pool.as_deref(), flat, nb, |i, row| {
+        let x = &sa[i * d..(i + 1) * d];
+        for (k, o) in row.iter_mut().enumerate() {
+            let y = &sb[k * d..(k + 1) * d];
+            *o = f(dot_fma(x, y));
+        }
+    });
+    out
+}
+
+/// numpy's float64 `np.sum` along a contiguous axis (pairwise summation with 8 accumulators).
+fn numpy_pairwise_sum(a: &[f64]) -> f64 {
+    let n = a.len();
+    if n < 8 {
+        a.iter().fold(0.0, |s, &x| s + x)
+    } else if n <= 128 {
+        let mut r = [0.0; 8];
+        r.copy_from_slice(&a[..8]);
+        let full = n - n % 8;
+        for i in (8..full).step_by(8) {
+            for j in 0..8 {
+                r[j] += a[i + j];
+            }
+        }
+        let res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+        a[full..].iter().fold(res, |s, &x| s + x)
+    } else {
+        let half = n / 2 - (n / 2) % 8;
+        numpy_pairwise_sum(&a[..half]) + numpy_pairwise_sum(&a[half..])
+    }
+}
+
+/// Index of the pivot `idamax` picks in `v`, as the OpenBLAS 0.3.x arm64 kernel (`iamax.S`) behind
+/// numpy's LAPACK does. For NaN-free input this is the first largest |v|. A NaN never survives as
+/// the running maximum of the element-wise scan: the next element replaces it, so an exact zero can
+/// become the pivot. Past 8 elements the kernel compares blocks of 8 by their `fmax` (NaN if any
+/// element is NaN, and such a block always wins), then takes the first element of the winning block
+/// equal to the maximum, or the block's first element when the maximum is NaN.
+fn openblas_iamax(v: &[f64]) -> usize {
+    // the kernel keeps its maximum on `fcmp max, x` + `ge`, which is false when either is NaN
+    let keeps = |mx: f64, x: f64| {
+        matches!(
+            mx.partial_cmp(&x),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        )
+    };
+    let (mut mx, mut idx) = (v[0].abs(), 0);
+    let blocks = (v.len() - 1) / 8;
+    for b in 0..blocks {
+        let blk = &v[1 + 8 * b..9 + 8 * b];
+        let t = if blk.iter().any(|x| x.is_nan()) {
+            f64::NAN
+        } else {
+            blk.iter().fold(0.0, |m: f64, x| m.max(x.abs()))
+        };
+        if !keeps(mx, t) {
+            (mx, idx) = (t, 1 + 8 * b);
+        }
+    }
+    if blocks > 0 {
+        let start = idx;
+        if let Some(q) = (start..start + 8).find(|&q| v[q].abs() == mx) {
+            idx = q;
+        }
+    }
+    for (r, x) in v.iter().enumerate().skip(1 + 8 * blocks) {
+        if !keeps(mx, x.abs()) {
+            (mx, idx) = (x.abs(), r);
+        }
+    }
+    idx
+}
+
+/// Solve A x = rhs by Gaussian elimination with partial pivoting; None when a pivot is exactly zero.
+/// Pivots are chosen like numpy's LAPACK (see `openblas_iamax`), so a NaN in A leads to the same
+/// zero pivot (geatpy 2.7.0: `det == 0`) or NaN solution as in the original. Dividing by the pivot
+/// (LAPACK multiplies by its reciprocal) keeps exactly duplicate rows exactly cancelling, so a
+/// singular A with repeated extreme points is reported as singular instead of solved from roundoff.
 fn solve_linear(mut a: Array2<f64>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
     let m = rhs.len();
     for col in 0..m {
-        let piv =
-            (col..m).max_by(|&x, &y| a[[x, col]].abs().partial_cmp(&a[[y, col]].abs()).unwrap())?;
+        let column: Vec<f64> = (col..m).map(|r| a[[r, col]]).collect();
+        let piv = col + openblas_iamax(&column);
         if a[[piv, col]] == 0.0 {
             return None;
         }
@@ -821,24 +1133,38 @@ pub fn refselect<'py>(
     for (r, &i) in rows.iter().enumerate() {
         c.row_mut(r).assign(&obj.row(i));
     }
+    // Minima, maxima and argmins below follow geatpy 2.7.0: start from the first value and replace
+    // it only by a strictly better one, so a leading NaN is kept and later NaNs are skipped.
     for j in 0..m {
-        let mn = c.column(j).iter().cloned().fold(f64::INFINITY, f64::min);
+        let col = c.column(j);
+        let mn = col
+            .iter()
+            .skip(1)
+            .fold(col[0], |mn, &v| if v < mn { v } else { mn });
         c.column_mut(j).mapv_inplace(|v| v - mn);
     }
     // extreme points (achievement scalarising function with weights 1e-6 off the diagonal)
     let extreme: Vec<usize> = (0..m)
         .map(|i| {
-            (0..rows.len())
-                .map(|r| {
-                    (0..m)
-                        .map(|j| if j == i { c[[r, j]] } else { c[[r, j]] / 1e-6 })
-                        .fold(f64::NEG_INFINITY, f64::max)
+            let asf = |r: usize| {
+                (1..m).map(|s| (i + s) % m).fold(c[[r, i]], |a, j| {
+                    let v = c[[r, j]] / 1e-6;
+                    if a < v {
+                        v
+                    } else {
+                        a
+                    }
                 })
-                .enumerate()
-                .fold(
-                    (0, f64::INFINITY),
-                    |best, (r, v)| if v < best.1 { (r, v) } else { best },
-                )
+            };
+            (1..rows.len())
+                .fold((0, asf(0)), |best, r| {
+                    let v = asf(r);
+                    if v < best.1 {
+                        (r, v)
+                    } else {
+                        best
+                    }
+                })
                 .0
         })
         .collect();
@@ -851,11 +1177,11 @@ pub fn refselect<'py>(
         Some(h) => h,
         None => (0..m)
             .map(|j| {
-                let mx = c
-                    .column(j)
+                let col = c.column(j);
+                let mx = col
                     .iter()
-                    .cloned()
-                    .fold(f64::NEG_INFINITY, f64::max);
+                    .skip(1)
+                    .fold(col[0], |mx, &v| if v > mx { v } else { mx });
                 1.0 / if mx <= 1e-6 { mx + 1e-6 } else { mx }
             })
             .collect(),
@@ -863,32 +1189,32 @@ pub fn refselect<'py>(
     for (j, &scale) in intercept_scale.iter().enumerate() {
         c.column_mut(j).mapv_inplace(|v| v * scale);
     }
-    // association with the reference points: the nearest reference line and the distance to it
-    let z_norm: Vec<f64> = z
-        .rows()
-        .into_iter()
-        .map(|r| r.iter().map(|v| v * v).sum::<f64>().sqrt())
-        .collect();
-    let (sc, sz, mz) = (c.as_slice().unwrap(), z.as_slice().unwrap(), z.shape()[1]);
+    // Association with the reference points, rounded like geatpy 2.7.0 so that ties (common with
+    // integer objectives) break the same way: rows are normalised first and multiplied with numpy
+    // `@` (an FMA chain in OpenBLAS), then each individual goes to the first reference point with
+    // the smallest 1 - cos^2, and d = sqrt(|c|^2 (1 - cos^2)) is NaN when roundoff makes it negative.
+    // Rows are independent, so they are associated in parallel when there are enough of them.
+    let (cu, zu) = (unit_rows(&c), unit_rows(&z));
+    let (scu, szu, mz) = (
+        cu.as_slice().unwrap(),
+        zu.as_slice().unwrap(),
+        zu.shape()[1],
+    );
     let assoc = |r: usize| -> (usize, f64) {
-        let cr = &sc[r * m..(r + 1) * m];
-        let norm2: f64 = cr.iter().map(|v| v * v).sum();
-        let norm = cr.iter().map(|v| v * v).sum::<f64>().sqrt();
-        (0..nz)
-            .map(|k| {
-                let dot: f64 = cr
-                    .iter()
-                    .zip(&sz[k * mz..(k + 1) * mz])
-                    .map(|(x, y)| x * y)
-                    .sum();
-                let cos = dot / (norm * z_norm[k]);
-                (norm2 * (1.0 - cos * cos)).max(0.0).sqrt()
-            })
-            .enumerate()
-            .fold(
-                (0, f64::INFINITY),
-                |b, (k, v)| if v < b.1 { (k, v) } else { b },
-            )
+        let x = &scu[r * m..(r + 1) * m];
+        let one_minus_cos2 = |k: usize| {
+            let cos = dot_fma(x, &szu[k * mz..(k + 1) * mz]);
+            1.0 - cos * cos
+        };
+        let (best, cm) = (1..nz).fold((0, one_minus_cos2(0)), |b, k| {
+            let v = one_minus_cos2(k);
+            if v < b.1 {
+                (k, v)
+            } else {
+                b
+            }
+        });
+        (best, (sq_norm(c.row(r)) * cm).sqrt())
     };
     let pool = crate::parallel::pool_for(rows.len() * nz * m, REFSELECT_PAR_MIN_WORK);
     let (pi, d): (Vec<usize>, Vec<f64>) =
@@ -920,12 +1246,15 @@ pub fn refselect<'py>(
             continue;
         }
         let pos = if r == 0 {
-            cands
-                .iter()
-                .enumerate()
-                .min_by(|a, b| d[n1 + a.1].partial_cmp(&d[n1 + b.1]).unwrap())
-                .unwrap()
-                .0
+            // the first closest candidate; like geatpy 2.7.0 only a strictly smaller distance
+            // replaces the current one, so NaN distances are never picked after the first
+            (1..cands.len()).fold(0, |s, q| {
+                if d[n1 + cands[q]] < d[n1 + cands[s]] {
+                    q
+                } else {
+                    s
+                }
+            })
         } else {
             0
         };
@@ -963,44 +1292,80 @@ pub fn refgselect<'py>(
     let mut obj = crate::utils::to_f64_array2(obj_v)?;
     crate::utils::unify_objectives(&mut obj, maxormins)?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
+    // Rounded like geatpy 2.7.0 throughout: minima start from the first value and take only a
+    // strictly smaller one, cosines are normalised rows multiplied as numpy `@` (see `dot_fma`).
     for j in 0..m {
-        let mn = obj.column(j).iter().cloned().fold(f64::INFINITY, f64::min);
+        let col = obj.column(j);
+        let mn = col
+            .iter()
+            .skip(1)
+            .fold(col[0], |mn, &v| if v < mn { v } else { mn });
         obj.column_mut(j).mapv_inplace(|v| v - mn);
     }
     let v = crate::utils::to_f64_array2(ref_point)?;
     let nv = v.shape()[0];
-    let viol = crate::utils::violation(cv, n)?.unwrap_or_else(|| vec![0.0; n]);
+    let vu = unit_rows(&v);
+    // Total violation as the original computes it: negative entries set to 0, then `np.sum(_, 1)`,
+    // so a NaN stays NaN (and counts as infeasible below).
+    let viol: Vec<f64> = match cv {
+        Some(c) if !c.is_none() => {
+            let a = crate::utils::to_f64_array2(c)?;
+            if a.shape()[0] != n {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "error: CV and ObjV disagree in number of rows.",
+                ));
+            }
+            a.rows()
+                .into_iter()
+                .map(|r| {
+                    let r: Vec<f64> = r.iter().map(|&x| if x < 0.0 { 0.0 } else { x }).collect();
+                    numpy_pairwise_sum(&r)
+                })
+                .collect()
+        }
+        _ => vec![0.0; n],
+    };
     let gamma: Vec<f64> = match gamma {
         Some(g) if !g.is_none() => crate::utils::to_f64_array1(g)?.to_vec(),
         _ => {
-            let mut cvv = cosine_matrix(&v, &v);
+            // cosine between reference vectors with the diagonal zeroed; an exact 1 (a repeated
+            // vector) is zeroed too, with the original's warning
+            let mut cvv = dot_matrix(&vu, &vu, |x| x);
             for i in 0..nv {
                 cvv[[i, i]] = 0.0;
             }
+            if cvv.iter().any(|&x| x == 1.0) {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyRuntimeWarning>(),
+                    c"Warning in refgselect: Some reference points are so close to the original point.(部分参考点过于接近坐标原点，此时将受到浮点精度限制的影响。)",
+                    1,
+                )?;
+                cvv.mapv_inplace(|x| if x == 1.0 { 0.0 } else { x });
+            }
+            // the largest cosine (first value, then strictly larger ones) and its angle; acos is not
+            // clamped, so a cosine rounded above 1 gives NaN as in the original
             (0..nv)
                 .map(|i| {
-                    cvv.row(i)
-                        .iter()
-                        .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max)
-                        .clamp(-1.0, 1.0)
+                    let row = cvv.row(i);
+                    row.iter()
+                        .skip(1)
+                        .fold(row[0], |mx, &x| if x > mx { x } else { mx })
                         .acos()
                 })
                 .collect()
         }
     };
-    let cos = cosine_matrix(&obj, &v);
-    let norm: Vec<f64> = obj
-        .rows()
-        .into_iter()
-        .map(|r| r.iter().map(|x| x * x).sum::<f64>().sqrt())
-        .collect();
+    let ou = unit_rows(&obj);
+    let norm: Vec<f64> = obj.rows().into_iter().map(|r| sq_norm(r).sqrt()).collect();
+    // cosine distance 1 - cos; each individual goes to the first reference vector with the smallest
+    let cos_dist = dot_matrix(&ou, &vu, |x| 1.0 - x);
     let assoc: Vec<usize> = (0..n)
         .map(|i| {
-            (0..nv)
-                .fold((0, f64::NEG_INFINITY), |b, k| {
-                    if cos[[i, k]] > b.1 {
-                        (k, cos[[i, k]])
+            (1..nv)
+                .fold((0, cos_dist[[i, 0]]), |b, k| {
+                    if cos_dist[[i, k]] < b.1 {
+                        (k, cos_dist[[i, k]])
                     } else {
                         b
                     }
@@ -1040,7 +1405,7 @@ pub fn refgselect<'py>(
         };
         let best = if !feasible.is_empty() {
             let w = p_theta / gamma[k];
-            let apd = |i: usize| (w * cos[[i, k]].clamp(-1.0, 1.0).acos() + 1.0) * norm[i];
+            let apd = |i: usize| (w * (1.0 - cos_dist[[i, k]]).acos() + 1.0) * norm[i];
             first_strictly_best(&feasible, &apd)
         } else {
             first_strictly_best(members, &|i: usize| viol[i])
@@ -1125,7 +1490,8 @@ pub fn migrate<'py>(
     let by_fitness_desc = |i: usize| -> Vec<usize> {
         let f = &fits.as_ref().unwrap()[i];
         let mut o: Vec<usize> = (0..pop_sizes[i]).collect();
-        o.sort_by(|&a, &b| f[b].partial_cmp(&f[a]).unwrap_or(std::cmp::Ordering::Equal));
+        // np.argsort(-FitnV): best first, NaN last
+        o.sort_by(|&a, &b| crate::utils::cmp_nan_last(-f[a], -f[b]));
         o
     };
     let n_emig: Vec<usize> = pop_sizes

@@ -1017,8 +1017,8 @@ pub fn mutpp<'py>(
     let (n, l) = (chrom.shape()[0], chrom.shape()[1]);
     for row in chrom.rows() {
         let mut v = row.to_vec();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if v.windows(2).any(|w| w[0] == w[1]) {
+        v.sort_by(|a, b| crate::utils::cmp_nan_last(*a, *b));
+        if v.iter().any(|x| x.is_nan()) || v.windows(2).any(|w| w[0] == w[1]) {
             return Err(err(
                 "error in mutpp: Chromosome error. (染色体不满足排列编码规则。)".to_string(),
             ));

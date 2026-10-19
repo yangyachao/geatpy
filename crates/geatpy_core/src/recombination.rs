@@ -425,8 +425,10 @@ fn gene_segments(gene_id: Opt, l: usize) -> PyResult<Option<(Vec<usize>, usize)>
             }
             // Segments are ordered by ID value (geatpy 2.7.0 sorts the genes by GeneID first), so
             // position-based crossovers cut between consecutive IDs, not in order of appearance.
-            let mut uniq: Vec<f64> = ids.to_vec();
-            uniq.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // geatpy 2.7.0 casts GeneID to int32 (NaN becomes 0, as numpy does on arm64)
+            let ids: Vec<f64> = ids.iter().map(|&v| f64::from(v as i32)).collect();
+            let mut uniq: Vec<f64> = ids.clone();
+            uniq.sort_by(f64::total_cmp);
             uniq.dedup();
             let seg = ids
                 .iter()
@@ -1094,6 +1096,17 @@ fn permutation_crossover<'py>(
         }
     }
     let chrom = to_f64_array2(old)?;
+    // geatpy 2.7.0 reads the gene range with int(np.min(Chrom)) and int(np.max(Chrom)) first.
+    if chrom.iter().any(|v| v.is_nan()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "cannot convert float NaN to integer",
+        ));
+    }
+    if chrom.iter().any(|v| v.is_infinite()) {
+        return Err(pyo3::exceptions::PyOverflowError::new_err(
+            "cannot convert float infinity to integer",
+        ));
+    }
     check_permutation(&chrom, name)?;
     let mode = pairing(half_n, chrom.nrows(), name)?;
     chrom_out(

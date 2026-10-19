@@ -48,13 +48,11 @@ fn wide_output(name: &str, n: usize, nsel: usize) -> bool {
     matches!(name, "urs" | "ecs") || (name == "otos" && nsel == n)
 }
 
+/// Indices by descending fitness, stable, NaN last (geatpy 2.7.0:
+/// `np.argsort(-FitnV, kind='mergesort')`).
 fn order_desc(fit: &[f64]) -> Vec<usize> {
     let mut o: Vec<usize> = (0..fit.len()).collect();
-    o.sort_by(|&a, &b| {
-        fit[b]
-            .partial_cmp(&fit[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    o.sort_by(|&a, &b| crate::utils::cmp_nan_last(-fit[a], -fit[b]));
     o
 }
 
@@ -213,7 +211,12 @@ fn ecs_idx(fit: &[f64], nsel: usize) -> Vec<usize> {
     if fit.is_empty() {
         return vec![];
     }
-    vec![order_desc(fit)[0]; nsel]
+    // np.argmax: the first maximum, or the first NaN if there is one
+    let best = fit
+        .iter()
+        .position(|v| v.is_nan())
+        .unwrap_or_else(|| (1..fit.len()).fold(0, |b, i| if fit[i] > fit[b] { i } else { b }));
+    vec![best; nsel]
 }
 
 fn select_by_name(name: &str, fit: &[f64], nsel: usize, tour: usize) -> PyResult<Vec<usize>> {

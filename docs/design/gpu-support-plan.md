@@ -110,8 +110,10 @@ ObjV 为 N×3 的近似球面前沿，Chrom 为 N×10 的 RI 染色体：
     约束、maxormins、needNum / needLevel，最大 N=20000；其中 18 例含 NaN 的输入两边同样 panic，见下）、
     `refselect` 与 `cdist` 866 例、`GD` / `IGD` / `Spacing` 240 例、`refgselect` 150 例，以及参考点列数与目标数不同的 `refselect`。
   - `tests/test_core_perf.py` 在仓库测试中比较 1 / 3 / 4 线程逐位一致，并覆盖 fork 子进程与 Fortran 顺序输入。
-  - 发现但未在本次修复：ObjV 含 NaN 时 ndsort 的排序比较器不满足全序，新版 Rust 标准库会 panic（2.7.3 即有，
-    官方 2.7.0 不会出错），单独跟进。
+  - ObjV 含 NaN 时 ndsort 会 panic（2.7.3 即有）的问题已在 master 修复（按原版走 numpy unique 与 T-ENS）。合并后含 NaN 的
+    输入沿用 master 的串行实现，不含 NaN 的输入走 `front_levels`；`refselect` / `refgselect` 的关联改用 master 复现原版
+    舍入的算术（行归一化 + FMA 点积），仍按行并行。合并后与 master 构建逐位比较（1 / 4 线程）全部一致：NaN、整数并列、
+    重复极点、重复参考向量 720 例，`refselect` 与 `cdist` 866 例，指标 240 例，`refgselect` 150 例。
 
 ### WP1 + WP2 端到端结果
 
