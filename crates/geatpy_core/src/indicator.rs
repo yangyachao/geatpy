@@ -20,6 +20,10 @@ fn pair(
     Ok((p, r))
 }
 
+/// Distance evaluations x objectives from which GD, IGD and Spacing run in parallel; the per-row
+/// minima are computed in parallel and summed in order, so the result does not change.
+const INDICATOR_PAR_MIN_WORK: usize = 1 << 16;
+
 fn sq_dist(a: &Array2<f64>, i: usize, b: &Array2<f64>, k: usize) -> f64 {
     (0..a.shape()[1])
         .map(|j| (a[[i, j]] - b[[k, j]]).powi(2))
@@ -36,13 +40,13 @@ pub fn GD(obj_v: &Bound<'_, PyAny>, pf: &Bound<'_, PyAny>, parallel: Opt) -> PyR
     if n == 0 || nr == 0 {
         return Ok(0.0);
     }
-    let s: f64 = (0..n)
-        .map(|i| {
-            (0..nr)
-                .map(|k| sq_dist(&p, i, &r, k))
-                .fold(f64::INFINITY, f64::min)
-        })
-        .sum();
+    let pool = crate::parallel::pool_for(n * nr * p.shape()[1], INDICATOR_PAR_MIN_WORK);
+    let nearest = crate::parallel::map_collect(pool.as_deref(), n, |i| {
+        (0..nr)
+            .map(|k| sq_dist(&p, i, &r, k))
+            .fold(f64::INFINITY, f64::min)
+    });
+    let s: f64 = nearest.into_iter().sum();
     Ok(s.sqrt() / n as f64)
 }
 
@@ -56,14 +60,14 @@ pub fn IGD(obj_v: &Bound<'_, PyAny>, pf: &Bound<'_, PyAny>, parallel: Opt) -> Py
     if n == 0 || nr == 0 {
         return Ok(0.0);
     }
-    let s: f64 = (0..nr)
-        .map(|k| {
-            (0..n)
-                .map(|i| sq_dist(&p, i, &r, k))
-                .fold(f64::INFINITY, f64::min)
-                .sqrt()
-        })
-        .sum();
+    let pool = crate::parallel::pool_for(n * nr * p.shape()[1], INDICATOR_PAR_MIN_WORK);
+    let nearest = crate::parallel::map_collect(pool.as_deref(), nr, |k| {
+        (0..n)
+            .map(|i| sq_dist(&p, i, &r, k))
+            .fold(f64::INFINITY, f64::min)
+            .sqrt()
+    });
+    let s: f64 = nearest.into_iter().sum();
     Ok(s / nr as f64)
 }
 
@@ -77,14 +81,13 @@ pub fn Spacing(obj_v: &Bound<'_, PyAny>, parallel: Opt) -> PyResult<f64> {
     if n <= 1 {
         return Ok(0.0);
     }
-    let d: Vec<f64> = (0..n)
-        .map(|i| {
-            (0..n)
-                .filter(|&k| k != i)
-                .map(|k| (0..m).map(|j| (p[[i, j]] - p[[k, j]]).abs()).sum::<f64>())
-                .fold(f64::INFINITY, f64::min)
-        })
-        .collect();
+    let pool = crate::parallel::pool_for(n * n * m, INDICATOR_PAR_MIN_WORK);
+    let d: Vec<f64> = crate::parallel::map_collect(pool.as_deref(), n, |i| {
+        (0..n)
+            .filter(|&k| k != i)
+            .map(|k| (0..m).map(|j| (p[[i, j]] - p[[k, j]]).abs()).sum::<f64>())
+            .fold(f64::INFINITY, f64::min)
+    });
     let mean = d.iter().sum::<f64>() / n as f64;
     Ok((d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt())
 }

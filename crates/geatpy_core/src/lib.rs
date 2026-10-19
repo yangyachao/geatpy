@@ -6,6 +6,7 @@ mod encoding;
 mod indicator;
 mod multiobjective;
 mod mutation;
+mod parallel;
 mod recombination;
 mod selection;
 pub mod utils;
@@ -14,6 +15,7 @@ use encoding::*;
 use indicator::*;
 use multiobjective::*;
 use mutation::*;
+use parallel::*;
 use recombination::*;
 use selection::*;
 
@@ -111,6 +113,10 @@ fn _geatpy_core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     indicator_submod.add_function(wrap_pyfunction!(Spacing, &indicator_submod)?)?;
     indicator_submod.add_function(wrap_pyfunction!(HV, &indicator_submod)?)?;
     m.add_submodule(&indicator_submod)?;
+
+    // 7. Threads used by the parallel operators
+    m.add_function(wrap_pyfunction!(set_num_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(get_num_threads, m)?)?;
 
     // Plotting (moeaplot, soeaplot, trcplot, varplot) lives in geatpy/core/_plot.py.
 

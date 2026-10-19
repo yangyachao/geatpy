@@ -114,6 +114,7 @@ from geatpy.core.crtup import crtup
 from geatpy.core.dup import dup
 from geatpy.core.ecs import ecs
 from geatpy.core.etour import etour
+from geatpy.core.get_num_threads import get_num_threads
 from geatpy.core.indexing import indexing
 import geatpy.core.indicator
 from geatpy.core.mergecv import mergecv
@@ -153,6 +154,7 @@ from geatpy.core.rwGA import rwGA
 from geatpy.core.rws import rws
 from geatpy.core.scaling import scaling
 from geatpy.core.selecting import selecting
+from geatpy.core.set_num_threads import set_num_threads
 from geatpy.core.soeaplot import soeaplot
 from geatpy.core.sus import sus
 from geatpy.core.tcheby import tcheby

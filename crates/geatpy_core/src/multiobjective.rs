@@ -112,6 +112,109 @@ pub fn ndsortDED<'py>(
     ndsort_wrapper(py, obj_v, args, kwargs, true)
 }
 
+/// Most unranked rows a front pass handles at a time: the serial head that estimates the front
+/// size, then each block of the parallel pass.
+const FRONT_CHUNK: usize = 1024;
+/// Unique rows from which non-dominated sorting may run in parallel.
+const FRONT_PAR_MIN_ROWS: usize = 512;
+
+/// A pass goes parallel when its expected front size times the objectives compared reaches this.
+const FRONT_PAR_MIN_WORK: usize = 1024;
+
+/// Efficient non-dominated sort, one complete front per pass. `pts` holds objectives 2..M (`w` of
+/// them) of the unique rows sorted lexicographically, `rep` their multiplicities. Returns the level
+/// of every unique row (0 = unranked) and the last level visited.
+///
+/// Only earlier rows can dominate a row (the first objective is sorted), and uniqueness turns
+/// weak dominance into dominance. A row joins the front iff no earlier row of the front dominates
+/// it, which (dominance being transitive) is the same as: no earlier unranked row dominates it.
+/// The parallel pass relies on that: a block of rows is checked against the front found before the
+/// block plus the earlier unranked rows of the block, so it finds exactly the serial front. It
+/// only pays when the front is large (each row is checked against all of it), so every pass starts
+/// serially and goes parallel once its first rows predict a large front.
+fn front_levels(
+    pts: &[f64],
+    w: usize,
+    rep: &[usize],
+    n: usize,
+    nums: usize,
+    max_level: usize,
+) -> (Vec<usize>, usize) {
+    let u = rep.len();
+    let row = |i: usize| &pts[i * w..(i + 1) * w];
+    let dominates = |j: usize, i: usize| row(j).iter().zip(row(i)).all(|(a, b)| a <= b);
+    let pool = crate::parallel::pool_for(u, FRONT_PAR_MIN_ROWS);
+    // blocks small enough to give every thread a share of a front pass
+    let chunk = (u / (2 * crate::parallel::num_threads())).clamp(64, FRONT_CHUNK);
+    let mut lv = vec![0usize; u];
+    let mut cri_level = 0usize;
+    let mut sums = 0usize;
+    if nums == 0 {
+        return (lv, cri_level);
+    }
+    let mut front: Vec<usize> = Vec::new();
+    let mut left = u; // unranked rows
+    loop {
+        cri_level += 1;
+        if cri_level > max_level {
+            break;
+        }
+        front.clear();
+        let serial_from = |from: usize, front: &mut Vec<usize>, limit: usize| -> (usize, usize) {
+            let (mut i, mut seen) = (from, 0);
+            while i < u && seen < limit {
+                if lv[i] == 0 {
+                    seen += 1;
+                    if !front.iter().rev().any(|&j| dominates(j, i)) {
+                        front.push(i);
+                    }
+                }
+                i += 1;
+            }
+            (i, seen)
+        };
+        let (next, seen) = serial_from(0, &mut front, chunk);
+        let expected = front.len() * left / seen.max(1);
+        match pool
+            .as_deref()
+            .filter(|_| expected * w >= FRONT_PAR_MIN_WORK && left > 2 * chunk)
+        {
+            None => {
+                serial_from(next, &mut front, usize::MAX);
+            }
+            Some(p) => {
+                let mut start = next;
+                while start < u {
+                    let mut cand = Vec::with_capacity(chunk);
+                    while start < u && cand.len() < chunk {
+                        if lv[start] == 0 {
+                            cand.push(start);
+                        }
+                        start += 1;
+                    }
+                    let earlier = &front;
+                    let keep = crate::parallel::map_collect(Some(p), cand.len(), |t| {
+                        let i = cand[t];
+                        // nearby rows first: a dominated row is usually dominated by one of them
+                        !cand[..t].iter().rev().any(|&j| dominates(j, i))
+                            && !earlier.iter().rev().any(|&j| dominates(j, i))
+                    });
+                    front.extend(cand.iter().zip(keep).filter(|(_, k)| *k).map(|(&i, _)| i));
+                }
+            }
+        }
+        for &i in &front {
+            lv[i] = cri_level;
+            sums += rep[i];
+        }
+        left -= front.len();
+        if sums >= nums || sums >= n {
+            break;
+        }
+    }
+    (lv, cri_level)
+}
+
 fn ndsort_core<'py>(
     py: Python<'py>,
     raw_obj: Array2<f64>,
@@ -196,39 +299,17 @@ fn ndsort_core<'py>(
         }
         inverse[i] = uni.len() - 1;
     }
-    let u = uni.len();
 
-    // Efficient non-dominated sort, one complete front per pass.
+    // Objectives 2..M of the unique rows, contiguous and in sorted order (the first objective
+    // only orders the rows).
+    let w = m.saturating_sub(1);
+    let pts: Vec<f64> = uni
+        .iter()
+        .flat_map(|&r| obj[r].iter().skip(1).copied())
+        .collect();
     let nums = need_num.unwrap_or(n);
     let max_level = need_level.unwrap_or(n);
-    let mut lv = vec![0usize; u];
-    let mut cri_level = 0usize;
-    let mut sums = 0usize;
-    if nums > 0 {
-        loop {
-            cri_level += 1;
-            if cri_level > max_level {
-                break;
-            }
-            for i in 0..u {
-                if lv[i] != 0 {
-                    continue;
-                }
-                // Rows are sorted on the first objective, so only earlier rows of this front can
-                // dominate row i; uniqueness turns weak dominance into dominance.
-                let dominated = (0..i).rev().any(|j| {
-                    lv[j] == cri_level && (1..m).all(|k| obj[uni[j]][k] <= obj[uni[i]][k])
-                });
-                if !dominated {
-                    lv[i] = cri_level;
-                    sums += rep[i];
-                }
-            }
-            if sums >= nums || sums >= n {
-                break;
-            }
-        }
-    }
+    let (lv, cri_level) = py.allow_threads(|| front_levels(&pts, w, &rep, n, nums, max_level));
 
     let levels = Array1::from_iter((0..n).map(|i| {
         let l = lv[inverse[i]];
@@ -297,6 +378,9 @@ pub fn crowdis<'py>(
     Ok(dist.into_pyarray(py))
 }
 
+/// Output elements x dimensions from which cdist runs in parallel.
+const CDIST_PAR_MIN_WORK: usize = 1 << 16;
+
 /// Pairwise distances between the rows of A and B: 'euclidean', 'cityblock',
 /// 'cosine' (1 - cosine similarity) or 'cosine_similarity'.
 #[pyfunction]
@@ -329,31 +413,12 @@ pub fn cdist<'py>(
         }
         y
     };
-    let mut out = Array2::<f64>::zeros((na, nb));
-    match metric {
-        "euclidean" => {
-            for i in 0..na {
-                for j in 0..nb {
-                    out[[i, j]] = (0..dim).map(|k| (arr_a[[i, k]] - arr_b[[j, k]]).powi(2)).sum::<f64>().sqrt();
-                }
-            }
-        }
-        "cityblock" => {
-            for i in 0..na {
-                for j in 0..nb {
-                    out[[i, j]] = (0..dim).map(|k| (arr_a[[i, k]] - arr_b[[j, k]]).abs()).sum();
-                }
-            }
-        }
+    let (ua, ub);
+    let (sa, sb) = match metric {
+        "euclidean" | "cityblock" => (arr_a.as_slice(), arr_b.as_slice()),
         "cosine" | "cosine_similarity" => {
-            let (ua, ub) = (unit(&arr_a), unit(&arr_b));
-            let similarity = metric == "cosine_similarity";
-            for i in 0..na {
-                for j in 0..nb {
-                    let dot: f64 = (0..dim).map(|k| ua[[i, k]] * ub[[j, k]]).sum();
-                    out[[i, j]] = if similarity { dot } else { 1.0 - dot };
-                }
-            }
+            (ua, ub) = (unit(&arr_a), unit(&arr_b));
+            (ua.as_slice(), ub.as_slice())
         }
         other => {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -361,8 +426,57 @@ pub fn cdist<'py>(
                 other
             )))
         }
+    };
+    let (sa, sb) = (
+        sa.expect("owned arrays are contiguous"),
+        sb.expect("owned arrays are contiguous"),
+    );
+    let mut out = Array2::<f64>::zeros((na, nb));
+    let pool = crate::parallel::pool_for(na * nb * dim.max(1), CDIST_PAR_MIN_WORK);
+    let flat = out.as_slice_mut().expect("owned arrays are contiguous");
+    match metric {
+        "euclidean" => pairwise(pool.as_deref(), flat, sa, sb, dim, |x, y| {
+            x.iter()
+                .zip(y)
+                .map(|(p, q)| (p - q).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        }),
+        "cityblock" => pairwise(pool.as_deref(), flat, sa, sb, dim, |x, y| {
+            x.iter().zip(y).map(|(p, q)| (p - q).abs()).sum()
+        }),
+        "cosine" => pairwise(pool.as_deref(), flat, sa, sb, dim, |x, y| {
+            1.0 - x.iter().zip(y).map(|(p, q)| p * q).sum::<f64>()
+        }),
+        _ => pairwise(pool.as_deref(), flat, sa, sb, dim, |x, y| {
+            x.iter().zip(y).map(|(p, q)| p * q).sum()
+        }),
     }
     Ok(out.into_pyarray(py))
+}
+
+/// out[i, j] = dist(row i of a, row j of b) for row-major `a` and `b` with `dim` columns.
+fn pairwise<F>(
+    pool: Option<&rayon::ThreadPool>,
+    out: &mut [f64],
+    a: &[f64],
+    b: &[f64],
+    dim: usize,
+    dist: F,
+) where
+    F: Fn(&[f64], &[f64]) -> f64 + Sync + Send,
+{
+    if dim == 0 {
+        out.fill(dist(&[], &[]));
+        return;
+    }
+    let rows_b: Vec<&[f64]> = b.chunks_exact(dim).collect();
+    crate::parallel::for_each_row(pool, out, rows_b.len(), |i, out_row| {
+        let x = &a[i * dim..(i + 1) * dim];
+        for (o, y) in out_row.iter_mut().zip(&rows_b) {
+            *o = dist(x, y);
+        }
+    });
 }
 
 /// Merge the columns of CV into one violation column: the sum of the entries above the threshold
@@ -614,17 +728,19 @@ fn cosine_matrix(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     };
     let (na, nb) = (norm(a), norm(b));
     let mut c = Array2::<f64>::zeros((a.shape()[0], b.shape()[0]));
-    for i in 0..a.shape()[0] {
-        for j in 0..b.shape()[0] {
+    let pool = crate::parallel::pool_for(c.len() * a.shape()[1], CDIST_PAR_MIN_WORK);
+    let flat = c.as_slice_mut().expect("owned arrays are contiguous");
+    crate::parallel::for_each_row(pool.as_deref(), flat, b.shape()[0], |i, row| {
+        for (j, out) in row.iter_mut().enumerate() {
             let dot: f64 = a
                 .row(i)
                 .iter()
                 .zip(b.row(j).iter())
                 .map(|(x, y)| x * y)
                 .sum();
-            c[[i, j]] = dot / (na[i] * nb[j]);
+            *out = dot / (na[i] * nb[j]);
         }
-    }
+    });
     c
 }
 
@@ -658,6 +774,9 @@ fn solve_linear(mut a: Array2<f64>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
     }
     Some(x)
 }
+
+/// Candidates x reference points x objectives from which the association runs in parallel.
+const REFSELECT_PAR_MIN_WORK: usize = 1 << 17;
 
 /// NSGA-III environmental selection on the critical front (Deb & Jain). Individuals of the fronts
 /// before criLevel are all kept; the remaining quota is filled niche by niche: the least crowded
@@ -744,51 +863,70 @@ pub fn refselect<'py>(
     for (j, &scale) in intercept_scale.iter().enumerate() {
         c.column_mut(j).mapv_inplace(|v| v * scale);
     }
-    // association with the reference points
-    let cos = cosine_matrix(&c, &z);
-    let mut pi = vec![0usize; rows.len()];
-    let mut d = vec![0.0; rows.len()];
-    for r in 0..rows.len() {
-        let norm2: f64 = c.row(r).iter().map(|v| v * v).sum();
-        let (best, dist) = (0..nz)
-            .map(|k| (norm2 * (1.0 - cos[[r, k]] * cos[[r, k]])).max(0.0).sqrt())
+    // association with the reference points: the nearest reference line and the distance to it
+    let z_norm: Vec<f64> = z
+        .rows()
+        .into_iter()
+        .map(|r| r.iter().map(|v| v * v).sum::<f64>().sqrt())
+        .collect();
+    let assoc = |r: usize| -> (usize, f64) {
+        let cr = c.row(r);
+        let norm2: f64 = cr.iter().map(|v| v * v).sum();
+        let norm = cr.iter().map(|v| v * v).sum::<f64>().sqrt();
+        (0..nz)
+            .map(|k| {
+                let dot: f64 = cr.iter().zip(z.row(k).iter()).map(|(x, y)| x * y).sum();
+                let cos = dot / (norm * z_norm[k]);
+                (norm2 * (1.0 - cos * cos)).max(0.0).sqrt()
+            })
             .enumerate()
             .fold(
                 (0, f64::INFINITY),
                 |b, (k, v)| if v < b.1 { (k, v) } else { b },
-            );
-        pi[r] = best;
-        d[r] = dist;
-    }
+            )
+    };
+    let pool = crate::parallel::pool_for(rows.len() * nz * m, REFSELECT_PAR_MIN_WORK);
+    let (pi, d): (Vec<usize>, Vec<f64>) =
+        crate::parallel::map_collect(pool.as_deref(), rows.len(), assoc)
+            .into_iter()
+            .unzip();
     let mut rho = vec![0usize; nz];
     for &p in &pi[..n1] {
         rho[p] += 1;
     }
-    let mut excluded = vec![false; nz];
+    // Niching: the least crowded reference point first (the lowest index among ties), its closest
+    // candidate when it has none yet, otherwise its first remaining candidate. Niches without
+    // candidates drop out.
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); nz.max(1)];
+    for t in 0..n2 {
+        members[pi[n1 + t]].push(t);
+    }
+    let mut open: std::collections::BTreeSet<(usize, usize)> =
+        (0..nz).map(|k| (rho[k], k)).collect();
     let mut chosen = vec![false; n2];
     let mut picked = 0;
     while picked < quota {
-        let Some(&min_rho) = (0..nz).filter(|&k| !excluded[k]).map(|k| &rho[k]).min() else {
+        let Some(&(r, j)) = open.first() else {
             break;
         };
-        let j = (0..nz)
-            .find(|&k| !excluded[k] && rho[k] == min_rho)
-            .unwrap();
-        let cands: Vec<usize> = (0..n2).filter(|&t| pi[n1 + t] == j && !chosen[t]).collect();
+        open.remove(&(r, j));
+        let cands = &mut members[j];
         if cands.is_empty() {
-            excluded[j] = true;
             continue;
         }
-        let s = if rho[j] == 0 {
-            *cands
+        let pos = if r == 0 {
+            cands
                 .iter()
-                .min_by(|&&a, &&b| d[n1 + a].partial_cmp(&d[n1 + b]).unwrap())
+                .enumerate()
+                .min_by(|a, b| d[n1 + a.1].partial_cmp(&d[n1 + b.1]).unwrap())
                 .unwrap()
+                .0
         } else {
-            cands[0]
+            0
         };
-        chosen[s] = true;
+        chosen[cands.remove(pos)] = true;
         rho[j] += 1;
+        open.insert((rho[j], j));
         picked += 1;
     }
     for (t, &i) in idx2.iter().enumerate() {
@@ -866,11 +1004,12 @@ pub fn refgselect<'py>(
         })
         .collect();
     let mut flag = Array1::from_elem(n, false);
-    let mut refs: Vec<usize> = assoc.clone();
-    refs.sort();
-    refs.dedup();
-    for k in refs {
-        let members: Vec<usize> = (0..n).filter(|&i| assoc[i] == k).collect();
+    // the members of every reference vector, in index order
+    let mut groups: Vec<Vec<usize>> = vec![Vec::new(); nv.max(1)];
+    for (i, &k) in assoc.iter().enumerate() {
+        groups[k].push(i);
+    }
+    for (k, members) in groups.iter().enumerate().filter(|(_, g)| !g.is_empty()) {
         let feasible: Vec<usize> = members
             .iter()
             .cloned()
@@ -899,7 +1038,7 @@ pub fn refgselect<'py>(
             let apd = |i: usize| (w * cos[[i, k]].clamp(-1.0, 1.0).acos() + 1.0) * norm[i];
             first_strictly_best(&feasible, &apd)
         } else {
-            first_strictly_best(&members, &|i: usize| viol[i])
+            first_strictly_best(members, &|i: usize| viol[i])
         };
         if let Some(best) = best {
             flag[best] = true;

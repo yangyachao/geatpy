@@ -1,5 +1,6 @@
 """Semantics that the 2.8.0 performance rewrites must keep."""
 import numpy as np
+import pytest
 
 import geatpy as ea
 
@@ -71,3 +72,95 @@ def test_mutde_with_more_offspring_than_rows_draws_from_every_row():
             b, c = _pair(d)
             seen.update((b, c))
     assert seen == set(range(n))
+
+
+def _front(rs, n, m):
+    x = rs.rand(n, m)
+    return x / np.linalg.norm(x, axis=1, keepdims=True) + 0.05 * rs.rand(n, m)
+
+
+def _parallel_cases():
+    """Deterministic operators on inputs large enough to take their parallel paths."""
+    rs = np.random.RandomState(0)
+    o3, o5 = _front(rs, 6000, 3), _front(rs, 1500, 5)
+    dup = np.round(rs.rand(5000, 4) * 5) / 5
+    cv = rs.rand(6000, 2) - 0.8
+    lv, cri = ea.ndsortESS(o3[:3000], 1500)
+    ref = ea.crtup(3, 1500)[0]
+    yield 'ndsortESS', lambda: ea.ndsortESS(o3)
+    yield 'ndsortESS_need', lambda: ea.ndsortESS(o5, 700)
+    yield 'ndsortTNS_cv', lambda: ea.ndsortTNS(o3, 6000, None, cv, [1, -1, 1])
+    yield 'ndsortDED_dup', lambda: ea.ndsortDED(dup)
+    yield 'refselect', lambda: ea.refselect(o3[:3000], lv, cri, 1500, ref)
+    yield 'refgselect', lambda: ea.refgselect(o3[:3000], ref, 2.0, cv[:3000])
+    for metric in ('euclidean', 'cityblock', 'cosine', 'cosine_similarity'):
+        yield 'cdist_' + metric, lambda m=metric: ea.cdist(o3[:2000], o5[:, :3], m)
+    yield 'GD', lambda: ea.indicator.GD(o3[:2000], ref)
+    yield 'IGD', lambda: ea.indicator.IGD(o3[:2000], ref)
+    yield 'Spacing', lambda: ea.indicator.Spacing(o3[:2000])
+
+
+def _same(a, b):
+    if isinstance(a, tuple):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, np.ndarray):
+        return a.dtype == b.dtype and np.array_equal(a, b, equal_nan=True)
+    return type(a) is type(b) and (a == b or (a != a and b != b))
+
+
+def test_parallel_paths_match_the_serial_ones_bit_for_bit():
+    try:
+        results = []
+        for threads in (1, 4, 3):
+            ea.set_num_threads(threads)
+            assert ea.get_num_threads() == threads
+            results.append({name: f() for name, f in _parallel_cases()})
+    finally:
+        ea.set_num_threads(None)
+    for name in results[0]:
+        assert _same(results[0][name], results[1][name]), name
+        assert _same(results[0][name], results[2][name]), name
+
+
+def test_set_num_threads_none_restores_the_default():
+    default = ea.get_num_threads()
+    assert default >= 1
+    ea.set_num_threads(2)
+    assert ea.get_num_threads() == 2
+    ea.set_num_threads(None)
+    assert ea.get_num_threads() == default
+    ea.set_num_threads(0)
+    assert ea.get_num_threads() == default
+
+
+def _sort_in_child(seed):
+    rs = np.random.RandomState(seed)
+    return ea.ndsortESS(_front(rs, 6000, 3))[1]
+
+
+@pytest.mark.filterwarnings('ignore:This process .* is multi-threaded:DeprecationWarning')
+def test_parallel_operators_work_in_forked_children():
+    import multiprocessing as mp
+    if 'fork' not in mp.get_all_start_methods():
+        return
+    ea.set_num_threads(4)
+    try:
+        expected = [_sort_in_child(s) for s in range(3)]  # builds the pool in the parent
+        with mp.get_context('fork').Pool(2) as pool:
+            got = pool.map_async(_sort_in_child, range(3)).get(timeout=120)
+    finally:
+        ea.set_num_threads(None)
+    assert got == expected
+
+
+def test_fortran_ordered_inputs_give_the_same_results():
+    rs = np.random.RandomState(0)
+    a, b = np.asfortranarray(rs.rand(500, 3)), rs.rand(3, 300).T  # both Fortran ordered
+    for metric in ('euclidean', 'cityblock', 'cosine', 'cosine_similarity'):
+        expected = ea.cdist(np.ascontiguousarray(a), np.ascontiguousarray(b), metric)
+        assert np.array_equal(ea.cdist(a, b, metric), expected)
+    for chrom in (rs.randint(0, 2, (50, 40)), rs.randint(0, 2, (50, 40)).astype(float)):
+        np.random.seed(1)
+        got = ea.mutbin('BG', np.asfortranarray(chrom))
+        np.random.seed(1)
+        assert np.array_equal(got, ea.mutbin('BG', np.ascontiguousarray(chrom)))

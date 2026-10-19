@@ -9,7 +9,7 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 - `crates/geatpy_core/src/`：Rust 内核。`lib.rs` 注册全部导出函数；`encoding.rs`（crt*、bs2*、ri2bs、boundfix）、
   `selection.rs`（选择、ranking/scaling/powing/indexing、otos、ecs）、`recombination.rs`（rec*、xov*、recombin）、`mutation.rs`（mut*、mutate）、
   `multiobjective.rs`（ndsort*、crowdis、cdist、mergecv、tcheby、pbi、awGA、rwGA、crtidp、refselect、refgselect、
-  migrate）、`indicator.rs`（GD、IGD、Spacing、HV）、`utils.rs`（参数解析、FixType 修复、int32 输出）。
+  migrate）、`indicator.rs`（GD、IGD、Spacing、HV）、`utils.rs`（参数解析、FixType 修复、int32 输出）、`parallel.rs`（rayon 线程池、`set_num_threads`）。
 - `geatpy/`：原版 Python 层（算法模板、Problem、Population 等），一般不改。
 - `tests/`：`test_core_parity.py` 与官方二进制的黑盒差分（期望值在 `tests/fixtures/core_parity_orig_2_7_0.json`）；
   `test_core_parity_review.py` 逆向复核得到的回归用例。
@@ -36,7 +36,9 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
   整数参数（Half_N、Nind 等）接受 numpy 整数（原版只认 Python int）。
 - 整数输出一律 int32（与原版一致）；例外是原版用 numpy 实现的 `crtbp`、`urs`、`ecs`、Nsel = N 的 `otos`（int64），
   以及长度 < 2 的排列染色体原样返回。
-- 并行参数 `Parallel` 目前不生效（为与原版随机序列语义对齐移除了 rayon）。
+- 算子的 `Parallel` 参数不生效。多线程由内核自动决定：确定性算子（ndsort*、refselect、refgselect、cdist、GD/IGD/Spacing）
+  在规模超过阈值时用 rayon 并行，结果与串行逐位一致；随机算子一律串行（实测收益很小，且要保持随机序列不变）。
+  线程数由 `GEATPY_NUM_THREADS` 或 `ea.set_num_threads()` 控制。
 
 ## 验证
 
@@ -45,10 +47,13 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 | Rust 内核 | `maturin develop --release` 后 `python -m pytest tests -q`；`cargo fmt --check`；`cargo clippy -- -D warnings` |
 | 有意改变输出 | 在 Docker 中用官方二进制重新生成黄金文件（`scripts/parity/run_original_core.sh`），提交说明写明原因 |
 | 改了算子行为或校验 | 用 `scripts/parity/fuzz/` 对官方二进制做随机差分（见其 README，官方 macOS arm64 轮子可在本机原生运行） |
+| 改了并行路径 | `tests/test_core_perf.py` 比较 1 线程与多线程逐位一致；另用旧版本对同一批输入逐位比较 |
 | 改了随机算子或性能路径 | 另跑 `scripts/parity/classic.py`（36 个经典用例，两边各 30 次，`cmp` 中 \|z\| > 3 需复查；`rastrigin_multi_SEGA` 因 migrate 缺陷修正而显著更好，属预期） |
 | 仅文档 | 检查内容与引用路径 |
 
 - 随机数一律用 `crate::utils::rng()`（每次调用从 numpy 全局 RandomState 取种子，`np.random.seed` 才能复现），不要用 `thread_rng`。
+- 并行只拆分与切分方式无关的工作（每个任务算一行输出或一个候选），用 `crate::parallel::pool_for` 按工作量决定是否并行；
+  求和等归约在并行算出各项后按原顺序串行完成，保证与串行逐位一致。
 - 性能优化只改实现、不改算法：每个基因/个体的概率与原版相同（例如 `mutbin` 用几何分布跳跃抽取变异位），改后用 fuzz 与
   `scripts/parity/classic.py` 确认分布与解质量不变。
 - 提交信息用英文 Conventional Commits；README 与设计文档用中文；Rust 注释用英文。
