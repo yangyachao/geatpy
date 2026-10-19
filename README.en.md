@@ -86,8 +86,7 @@ official binaries contradict their own documentation, this project follows the d
 `mutgau`/`mutuni` with `Middle=True` centre on `(ub-lb)/2` instead of the interval midpoint, `crtip` produces
 out-of-range integers for fractional bounds, `migrate` with `Replacement=1` always evicts the last individual and the
 fully connected structure (`Structure=0`) migrates from a population to itself, `pbi` returns NaN for an individual
-exactly at the ideal point, `crowdis` returns NaN when objectives contain inf, and `cdist` reads non-contiguous arrays
-(such as `A[::-1]`) incorrectly. The official binaries also segfault on length-1 chromosomes or 1-D input
+exactly at the ideal point, and `cdist` reads non-contiguous arrays (such as `A[::-1]`) incorrectly. The official binaries also segfault on length-1 chromosomes or 1-D input
 (`xovsp`/`xovsh`, ...); the Rust core handles them.
 
 ---

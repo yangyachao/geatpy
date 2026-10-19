@@ -159,6 +159,14 @@ pub fn to_i32_array2(obj: &Bound<'_, PyAny>) -> Option<Array2<i32>> {
     None
 }
 
+/// numpy's sort order for floats (`np.sort`, `np.argsort`): NaN after every number, NaNs equal to
+/// each other. Unlike `partial_cmp(..).unwrap_or(Equal)` this is a total order, so `sort_by` never
+/// panics on NaN; for NaN-free input it agrees with `partial_cmp`.
+pub fn cmp_nan_last(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b)
+        .unwrap_or_else(|| a.is_nan().cmp(&b.is_nan()))
+}
+
 /// Calls `f(k)` for every k in 0..total selected by independent Bernoulli(p) trials. Draws the
 /// geometric gaps between hits instead of one uniform per index: same distribution, far fewer
 /// random numbers when p is small (e.g. the default Pm = 1/L).

@@ -29,11 +29,12 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
   时返回理想点、`refselect` 候选矩阵行序错位及无需选择时返回 arange、`migrate` 的 `Replacement=2` 淘汰最优个体、
   `mutgau`/`mutuni` 的 `Middle=True` 以 `(ub-lb)/2` 为中心、`crtip` 边界为小数时越界。
 - 原版缺陷（第三轮差分确认）：`migrate` 的 `Replacement=1` 总淘汰最后一个个体、`Structure=0` 迁入来源含自身；
-  `pbi` 个体在理想点时为 NaN；`crowdis` 含 inf 时为 NaN；`cdist` 对非连续数组读错；长度为 1 或一维输入时段错误；
+  `pbi` 个体在理想点时为 NaN；`cdist` 对非连续数组读错；长度为 1 或一维输入时段错误；
   HV 内部 float32；`sus` 二进制要求至少 3 个参数。
 - `rws` 先把 FitnV 平移到非负；`crowdis` 接受 `levels=None`；HV 在 M=4 时用精确算法（原版蒙特卡洛）。
 - 有意更宽松（原版报错）：`maxormins` 接受 list；'P' 编码的 mutinv/mutmove/mutswap 不强制 FieldDR；一维输入；
   整数参数（Half_N、Nind 等）接受 numpy 整数（原版只认 Python int）。
+- GeneID 与原版一样截断为 int32；NaN 按 arm64 上 numpy 的转换取 0（x86_64 原版得到 INT_MIN，排序位置不同）。
 - 整数输出一律 int32（与原版一致）；例外是原版用 numpy 实现的 `crtbp`、`urs`、`ecs`、Nsel = N 的 `otos`（int64），
   以及长度 < 2 的排列染色体原样返回。
 - 并行参数 `Parallel` 目前不生效（为与原版随机序列语义对齐移除了 rayon）。
@@ -48,6 +49,9 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 | 改了随机算子或性能路径 | 另跑 `scripts/parity/classic.py`（36 个经典用例，两边各 30 次，`cmp` 中 \|z\| > 3 需复查；`rastrigin_multi_SEGA` 因 migrate 缺陷修正而显著更好，属预期） |
 | 仅文档 | 检查内容与引用路径 |
 
+- 浮点排序用全序比较（`crate::utils::cmp_nan_last`，即 numpy 的 NaN 置后顺序），不要用 `partial_cmp(..).unwrap()` 或
+  `unwrap_or(Equal)`：后者遇到 NaN 不是全序，Rust 1.81 起排序会 panic。目标值含 NaN 时 `ndsort*` 调用 numpy 的
+  `np.unique`/`np.argsort`，与原版一样由 numpy 的快速排序决定相等行的先后。
 - 随机数一律用 `crate::utils::rng()`（每次调用从 numpy 全局 RandomState 取种子，`np.random.seed` 才能复现），不要用 `thread_rng`。
 - 性能优化只改实现、不改算法：每个基因/个体的概率与原版相同（例如 `mutbin` 用几何分布跳跃抽取变异位），改后用 fuzz 与
   `scripts/parity/classic.py` 确认分布与解质量不变。

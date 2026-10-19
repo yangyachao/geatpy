@@ -28,6 +28,19 @@ F1 = X2[:10, :1].copy()
 F1_TIES = np.array([[3.], [1.], [2.], [1.], [5.], [3.], [0.], [2.], [4.], [0.]])
 CV10 = CV2[:10]
 W2 = np.array([[0.2, 0.8]] * 6)
+# NaN objectives / fitness (own generator so the inputs above stay unchanged)
+_rsn = np.random.RandomState(2710)
+X3N = np.where(_rsn.rand(60, 3) < 0.1, np.nan, X3)
+X3N[[7, 31]] = np.nan
+X2N = np.where(_rsn.rand(60, 2) < 0.1, np.nan, X2)
+X2N[0, 1], X2N[1] = np.nan, X2[1]  # a NaN in the first row becomes the column maximum under CV
+X1N = np.where(_rsn.rand(12, 1) < 0.3, np.nan, np.round(X2[:12, :1], 1))
+# rows repeated with NaN in the first objective only: numpy keeps them apart (at most 16 rows, so
+# np.unique's quicksort is an insertion sort and the order is the same for every numpy version)
+X3N_DUP = np.array([[np.nan, 1, 2], [0.5, 1, 1], [np.nan, 1, 2], [0, 3, 3], [np.nan, 1, 2], [1, 0, np.nan]])
+CV2N = CV2.copy()
+CV2N[0, 0] = 0.5
+F1N = np.where(_rsn.rand(10, 1) < 0.3, np.nan, F1)
 FIELD_BG = None  # built lazily because it needs ea.crtfld
 
 
@@ -66,10 +79,22 @@ def _cases(ea):
         c[fn + '_4obj'] = lambda f=f: f(X4)
         c[fn + '_dup'] = lambda f=f: f(DUP2)
         c[fn + '_dup_need15'] = lambda f=f: f(DUP2, 15)
+        c[fn + '_nan_3obj'] = lambda f=f: f(X3N)
+        c[fn + '_nan_3obj_need30'] = lambda f=f: f(X3N, 30)
+        c[fn + '_nan_2obj'] = lambda f=f: f(X2N)
+        c[fn + '_nan_2obj_level2'] = lambda f=f: f(X2N, None, 2)
+        c[fn + '_nan_1obj'] = lambda f=f: f(X1N)
+        c[fn + '_nan_dup'] = lambda f=f: f(X3N_DUP)
+        c[fn + '_nan_cv'] = lambda f=f: f(X2N, None, None, CV2N)
+        c[fn + '_nan_later_rows_cv'] = lambda f=f: f(X2N[1:], None, None, CV2N[1:])
+        c[fn + '_nan_maxmin'] = lambda f=f: f(X2N, None, None, None, MOM)
     # --- crowding / distances / aggregation ------------------------------------
     c['crowdis_levels'] = lambda: ea.crowdis(X2, ea.ndsortESS(X2)[0])
     c['crowdis_ones'] = lambda: ea.crowdis(X3, np.ones(len(X3)))
     c['crowdis_partial'] = lambda: ea.crowdis(X2, ea.ndsortESS(X2, 20)[0])
+    c['crowdis_nan'] = lambda: ea.crowdis(X3N, ea.ndsortESS(X3N)[0])
+    c['crowdis_nan_1obj'] = lambda: ea.crowdis(X1N, np.ones(len(X1N)))
+    c['crowdis_inf'] = lambda: ea.crowdis(np.where(np.isnan(X2N), np.inf, X2N), ea.ndsortESS(X2)[0])
     for m in ['euclidean', 'cityblock', 'cosine', 'cosine_similarity']:
         c['cdist_' + m] = lambda m=m: ea.cdist(X3[:5], X3[5:9], m)
     c['cdist_default'] = lambda: ea.cdist(X3[:5], X3[5:9])
@@ -110,6 +135,8 @@ def _cases(ea):
     c['dup'] = lambda: ea.dup(F1, 6)
     c['dup_more'] = lambda: ea.dup(F1, 25)
     c['ecs'] = lambda: ea.ecs(F1, 6)
+    c['dup_nan'] = lambda: ea.dup(F1N, 6)
+    c['ecs_nan'] = lambda: ea.ecs(F1N, 6)
     c['otos'] = lambda: ea.otos(F1, 5)
     c['otos_2'] = lambda: ea.otos(F1, 2)
     # --- reference points ------------------------------------------------------
@@ -189,7 +216,7 @@ KNOWN_ORIGINAL_DEFECT_CASES['refselect_all'] = ('original returns np.arange(N) i
 
 
 # Operators that return their selection in random order (as the original does): compare as multisets.
-ORDER_FREE = {'dup', 'dup_more', 'otos', 'otos_2'}
+ORDER_FREE = {'dup', 'dup_more', 'dup_nan', 'otos', 'otos_2'}
 
 
 def known_defect(name):
