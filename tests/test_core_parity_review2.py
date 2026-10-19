@@ -87,6 +87,15 @@ def test_global_uniform_recombination_draws_genes_from_the_whole_population(name
     assert np.mean([len(set(r)) for r in out]) > 2
 
 
+@pytest.mark.parametrize('dtype', [np.int32, np.int64, np.float64])
+def test_mutbin_accepts_fortran_ordered_chromosomes(dtype):
+    chrom = np.random.RandomState(0).randint(0, 2, (50, 40)).astype(dtype)
+    np.random.seed(1)
+    got = ea.mutbin('BG', np.asfortranarray(chrom))
+    np.random.seed(1)
+    assert np.array_equal(got, ea.mutbin('BG', np.ascontiguousarray(chrom)))
+
+
 def test_xovud_default_probability_is_one_half():
     a, b = np.zeros((1, 400), dtype=int), np.ones((1, 400), dtype=int)
     changed = np.mean([ea.xovud(np.vstack([a, b]))[0].mean() for _ in range(50)])
