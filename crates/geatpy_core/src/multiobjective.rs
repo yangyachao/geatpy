@@ -820,9 +820,10 @@ fn unit_rows(x: &Array2<f64>) -> Array2<f64> {
 /// One entry of numpy `a @ b.T` for float64 matrices: OpenBLAS dgemm accumulates the products in
 /// order as a chain of fused multiply-adds starting from zero.
 fn dot_fma(a: ArrayView1<f64>, b: ArrayView1<f64>) -> f64 {
-    a.iter()
-        .zip(b.iter())
-        .fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s))
+    match (a.as_slice(), b.as_slice()) {
+        (Some(x), Some(y)) => crate::utils::dot_fma(x, y),
+        _ => crate::utils::dot_fma(&a.to_vec(), &b.to_vec()),
+    }
 }
 
 /// numpy's float64 `np.sum` along a contiguous axis (pairwise summation with 8 accumulators).

@@ -183,6 +183,30 @@ pub fn cmp_nan_last(a: f64, b: f64) -> std::cmp::Ordering {
         .unwrap_or_else(|| a.is_nan().cmp(&b.is_nan()))
 }
 
+/// Dot product as a chain of fused multiply-adds starting from zero (what numpy's float64 `@`
+/// computes through OpenBLAS). x86_64 wheels target CPUs without FMA, where every `mul_add` is a
+/// call into the `fma` routine; on CPUs with FMA the same chain runs as hardware instructions,
+/// which round identically (once per step), so the result does not depend on the CPU.
+pub fn dot_fma(a: &[f64], b: &[f64]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("fma") {
+        // SAFETY: the CPU supports FMA
+        return unsafe { dot_fma_hw(a, b) };
+    }
+    dot_fma_chain(a, b)
+}
+
+#[inline(always)]
+fn dot_fma_chain(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).fold(0.0, |s: f64, (x, y)| x.mul_add(*y, s))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn dot_fma_hw(a: &[f64], b: &[f64]) -> f64 {
+    dot_fma_chain(a, b)
+}
+
 /// Calls `f(k)` for every k in 0..total selected by independent Bernoulli(p) trials. Draws the
 /// geometric gaps between hits instead of one uniform per index: same distribution, far fewer
 /// random numbers when p is small (e.g. the default Pm = 1/L).
