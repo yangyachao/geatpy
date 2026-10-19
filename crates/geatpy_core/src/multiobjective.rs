@@ -729,15 +729,15 @@ fn cosine_matrix(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     let (na, nb) = (norm(a), norm(b));
     let mut c = Array2::<f64>::zeros((a.shape()[0], b.shape()[0]));
     let pool = crate::parallel::pool_for(c.len() * a.shape()[1], CDIST_PAR_MIN_WORK);
+    let (a, b) = (a.as_standard_layout(), b.as_standard_layout());
+    let (sa, sb) = (a.as_slice().unwrap(), b.as_slice().unwrap());
+    let d = a.shape()[1];
     let flat = c.as_slice_mut().expect("owned arrays are contiguous");
     crate::parallel::for_each_row(pool.as_deref(), flat, b.shape()[0], |i, row| {
+        let x = &sa[i * d..(i + 1) * d];
         for (j, out) in row.iter_mut().enumerate() {
-            let dot: f64 = a
-                .row(i)
-                .iter()
-                .zip(b.row(j).iter())
-                .map(|(x, y)| x * y)
-                .sum();
+            let y = &sb[j * d..(j + 1) * d];
+            let dot: f64 = x.iter().zip(y).map(|(p, q)| p * q).sum();
             *out = dot / (na[i] * nb[j]);
         }
     });
@@ -869,13 +869,18 @@ pub fn refselect<'py>(
         .into_iter()
         .map(|r| r.iter().map(|v| v * v).sum::<f64>().sqrt())
         .collect();
+    let (sc, sz, mz) = (c.as_slice().unwrap(), z.as_slice().unwrap(), z.shape()[1]);
     let assoc = |r: usize| -> (usize, f64) {
-        let cr = c.row(r);
+        let cr = &sc[r * m..(r + 1) * m];
         let norm2: f64 = cr.iter().map(|v| v * v).sum();
         let norm = cr.iter().map(|v| v * v).sum::<f64>().sqrt();
         (0..nz)
             .map(|k| {
-                let dot: f64 = cr.iter().zip(z.row(k).iter()).map(|(x, y)| x * y).sum();
+                let dot: f64 = cr
+                    .iter()
+                    .zip(&sz[k * mz..(k + 1) * mz])
+                    .map(|(x, y)| x * y)
+                    .sum();
                 let cos = dot / (norm * z_norm[k]);
                 (norm2 * (1.0 - cos * cos)).max(0.0).sqrt()
             })
