@@ -1,30 +1,32 @@
-# geatpy-rs 2.8.0 GPU 加速方案
+# geatpy-rs 2.8.0 性能与 GPU 支持方案
 
-- 状态：**规划中，待评审**。开发分支 `2.8.0-gpu`。
-- 来源：2026-10-11 提出、当时搁置的 GPU 方案（第 1 节剖析数据沿用），本版细化为 2.8.0 的可执行计划。
+- 状态：**已评审，按本方案实施**。开发分支 `2.8.0-gpu`。
+- 来源：2026-10-11 提出、当时搁置的 GPU 方案。评审结论是 GPU 整体收益有限，2.8.0 改为**先把 CPU 内核做快，
+  GPU 只做轻量的求值支持**，GPU 算子卸载暂缓（设计保留在附录 A）。
 - 基线：geatpy-rs 2.7.3（`3f1b534`）。
 
 ## 0. 目标与边界
 
 目标：
 
-1. 用户可以把**目标函数求值**放到 GPU 上（PyTorch / CuPy），无需自己写转换代码。
-2. 大种群（N 数千以上）时，**O(N²) 的确定性算子**可选择卸载到 GPU。
-3. **默认行为不变**：不安装 torch、或不开启 GPU 时，输出与 2.7.3 完全一致，
-   `tests/test_core_parity*.py` 照旧全部通过；与官方 2.7.0 二进制的一致性约定不受影响。
-4. 发布形态不变：仍是单一 `cp38-abi3` 轮子，Rust 内核不引入任何 CUDA 构建依赖。
+1. 修掉 `mutde` 的 O(N²) 实现问题。
+2. 恢复多核并行（rayon），覆盖大种群下的热点算子。
+3. `evalVars` / `aimFunc` 可以直接返回 PyTorch / CuPy 张量，方便用户把目标函数放到 GPU 上。
+4. 与官方 2.7.0 二进制的一致性约定不变：确定性算子并行前后**逐位一致**，随机算子**分布一致**；
+   `tests/test_core_parity*.py` 全部通过。
+5. 发布形态不变：单一 `cp38-abi3` 轮子，不引入 CUDA 或 torch 依赖。
 
 不做：
 
-- 在 Rust 内核里写 CUDA / wgpu（需按 CUDA 版本和平台分别出轮子，CI 与发布成本成倍增加，收益有限）。
-- 全部算子、全部编码的 GPU 版本；变异/重组这类 O(N·D) 的访存型算子在 GPU 上收益抵不过传输。
-- 种群常驻 GPU 的新算法模板（列入 2.9 预研，见第 6 节）。
+- Rust 内核里写 CUDA / wgpu。
+- 2.8.0 内的 GPU 算子卸载（附录 A）与种群常驻 GPU 的算法模板（附录 B）。
 
-## 1. 耗时剖析（沿用 2.7.1 数据）
+## 1. 评审依据
+
+### 1.1 端到端剖析（2.7.1 数据，2.7.3 未改变这些热点）
 
 用 cProfile 统计典型算法的耗时分布。测试函数是廉价的 numpy 实现（DTLZ2 M=3 D=12、Rastrigin D=30），
 因此内核占比偏高；真实问题的目标函数往往是仿真或模型计算，求值通常占 90% 以上。
-2.7.3 的性能改动只涉及二进制/排列算子，下表热点未变。
 
 | 场景 | 总耗时 | 目标函数求值 | Rust 内核 | Python 其它 | 主要热点 |
 | --- | --- | --- | --- | --- | --- |
@@ -36,142 +38,122 @@
 | DE/rand/1/bin, N=100, 500 代 | 0.12 s | 14% | 50% | 36% | mutde 32% |
 | DE/rand/1/bin, N=10000, 20 代 | 2.74 s | 2% | 96% | 2% | **mutde 93%** |
 
-结论：
+### 1.2 单算子耗时（2.7.3，单线程，2026-10-19 实测）
 
-- 常规规模（N ≤ 1000）下每代内核耗时只有毫秒级，GPU 的启动与 PCIe 传输开销会抵消收益。
-- 用户想要 GPU 的真实诉求多数是**目标函数本身很慢**，应让求值跑在 GPU 上（WP1，收益最大）。
-- 大种群下的热点是 O(N²) 算子（非支配排序、参考点关联、距离矩阵）（WP3），
-  以及 `mutde` 的一个实现问题（WP2，纯 CPU 修复）。
+ObjV 为 N×3 的近似球面前沿，Chrom 为 N×10 的 RI 染色体：
 
-## 2. 总体架构
+| N | `ndsortESS` | `mutde` | `cdist(ObjV, ObjV)` |
+| --- | --- | --- | --- |
+| 1000 | 2.3 ms | 2.4 ms | 8.1 ms |
+| 5000 | 46 ms | 33 ms | 142 ms |
+| 20000 | 674 ms | 572 ms | 12.9 s |
 
-```
-用户 evalVars(Vars) ── Vars 为 torch/cupy 张量 ──┐
-                                                  │  geatpy/_device.py（设备解析、张量 <-> numpy 转换，懒加载 torch/cupy）
-Problem.evaluation ──── ObjV/CV 自动转回 numpy ───┘
-        │
-Algorithm 模板（原样）── ea.ndsortESS / ea.cdist / ea.refselect ...
-        │
-geatpy/core/__init__.py 分派层：GPU 已开启 且 输入规整 且 N ≥ 阈值 ？ ──是──> geatpy/gpu/（torch 实现）
-                                                                └──否──> _geatpy_core（Rust，原样）
-```
+`cdist` 的 N×N 结果在 N=20000 时有 3.2 GB，耗时主要花在内存上；模板里 `cdist` 多用于 N×R（参考点）的规模，
+上表最后一列只说明 N×N 用法本身不可扩展，GPU 也无济于事（结果仍需回传主机）。
 
-两个开关相互独立：
+### 1.3 结论
 
-- **求值设备**属于问题：`ea.Problem(..., device='cuda')`。
-- **算子卸载**是全局配置：`ea.gpu.enable(device='cuda', min_size=None)` / `ea.gpu.disable()` / `ea.gpu.status()`，
-  也可用环境变量 `GEATPY_GPU=cuda:0` 开启。默认关闭。
+- 常规规模（N ≤ 1000）每代内核只有几毫秒，GPU 的启动与传输开销会抵消收益。
+- N=5000 时 GPU 卸载 ndsort 估计能让端到端快 3～4 倍；但真实问题中求值占 90% 以上，内核再快，整体最多快约 10%，
+  且 Python 层的 17%～36% 开销 GPU 无能为力。
+- GPU 求值对性能本身没有贡献：用户今天就可以在 `evalVars` 里自行转换张量；geatpy 能做的是省掉这几行样板代码。
+- 确定的收益在 CPU 侧：`mutde` 修复（大种群预计约 100 倍）与多核并行（8～16 核上数倍），对所有用户生效，
+  不增加依赖，不需要维护两套实现。
 
-## 3. 工作包
+## 2. 工作包
 
-### WP1 设备转换层 + GPU 求值（只改 Python 层）
+### WP1 `mutde` 的 O(N²) 修复
 
-现状障碍：`Algorithm.call_aimFunc` 要求 `pop.ObjV` / `pop.CV` 是 `np.ndarray`，
-`evalVars` 返回 torch / cupy 张量会直接报 `ObjV is illegal`。
+- 现状：每个个体都构造长度 N 的候选池（`(0..n).filter(..).collect()` + `swap_remove`），整体 O(N²)。
+- 改为对 3～5 个下标做拒绝采样：均匀、互不相同、`rows == n` 时排除自身；候选不足（N 很小）时退化为与现在相同的
+  有放回抽样（`draw` 在候选池耗尽后的行为）。分布与现实现完全相同，只是随机序列不同。
+- 验证：`scripts/parity/fuzz/` 对官方二进制做随机差分；`scripts/parity/classic.py` 中 DE 系列用例 |z| ≤ 3。
+- 验收：DE/rand/1/bin N=10000 端到端提速 ≥ 10 倍。
 
-改动：
+### WP2 rayon 确定性并行
 
-- 新增 `geatpy/_device.py`：
-  - `resolve_device(spec)`：解析 `'cuda'`、`'cuda:1'`、`'mps'`、`'cpu'`，以及 `'cupy'` / `'cupy:1'`；
-    后端未安装或设备不可用时报清晰的错误。
-  - `to_device(arr, device, dtype=None)`：numpy → torch/cupy 张量。
-  - `to_numpy(x)`：按类型鸭子识别（不主动 import torch/cupy）：torch 用 `.detach().cpu().numpy()`，
-    cupy 用 `.get()`，CPU 上的 DLPack 对象用 `np.from_dlpack`，其余 `np.asarray`；结果统一为 float64 二维数组。
-- `Problem.__init__` 末尾增加仅关键字参数 `device=None, dtype=None`（现有子类按位置调用父类构造，不受影响）：
-  - 设置 `device` 后，`evaluation` 把 `pop.Phen` 转成该设备上的张量再传给 `evalVars`；
-  - `dtype` 默认保持 float64；可设 `'float32'`（消费级显卡 fp64 吞吐只有 fp32 的 1/32～1/64，Apple MPS 不支持 fp64）；
-  - `aimFunc(pop)` 路径不改 `pop.Phen` 的类型（避免破坏 Population 语义），用户自行转换；
-  - **无论是否设置 `device`**，`evalVars` / `aimFunc` 写回的 `ObjV`、`CV` 若是张量都自动转回 numpy
-    （属于“有意更宽松”，写入 AGENTS.md 的差异清单）；`calReferObjV` 的返回值同样处理。
-- 顺带修正 `Problem.evaluation` 的异常吞没：它用 `except RuntimeError` 判断“子类没有重写 aimFunc”，
+原则：**结果与线程数无关**。确定性算子并行前后逐位一致；随机算子在相同 `np.random.seed` 下，
+无论几个线程都得到同样结果。
+
+- 依赖：重新引入 `rayon`；计算期间用 `py.allow_threads` 释放 GIL（种子在释放前取好，`crate::utils::rng()` 需要 GIL）。
+- 线程数：默认使用全部核心，可用环境变量 `GEATPY_NUM_THREADS` 或 `ea.set_num_threads(n)` 设置；
+  `ea.set_num_threads(1)` 完全回到串行。
+- **确定性算子：超过规模阈值时自动并行**，不依赖 `Parallel` 参数（模板调用这些算子时从不传 `Parallel`，
+  只认参数的话模板用户拿不到收益；由于结果逐位一致，自动开启不改变任何行为）：
+
+  | 算子 | 并行方式 | 备注 |
+  | --- | --- | --- |
+  | `refselect` | 个体到参考向量距离与关联按行并行；小生境选择（随机）保持串行 | NSGA-III 热点 |
+  | `cdist` | 按输出行并行 | |
+  | `ndsortESS` / `ndsortTNS` | ENS-SS 的逐个插入本身是串行的；候选做法：插入时与前沿成员的支配检查按块并行，或 N 很大时改用并行支配计数 | **需实验**，取更快者，结果必须逐位一致 |
+  | `crowdis`、`GD` / `IGD` / `Spacing` | 按目标或按行并行 | 视实测收益决定是否做 |
+
+- **随机算子：仅在 `Parallel=True` 时并行**（沿用原版参数语义，默认 False，序列与 2.7.3 相同）。
+  并行时按固定大小的行块切分，每块从 `rng()` 依次派生子种子，块大小与线程数无关，保证可复现。
+  候选：`mutpolyn`、`mutgau`、`mutbga`、`mutde`、`recsbx`、`recdis`、`mutbin` 等逐行独立的算子；
+  这类算子是 O(N·D)，收益有限，只做实测有收益的几个。
+- 阈值：每个算子的自动并行阈值由基准确定（小规模时线程调度开销大于收益），写在 Rust 常量里并注释来源。
+- 验证：确定性算子在 1 / 2 / 全部线程下与串行逐位比较；随机算子跑 fuzz 与 `classic.py`；
+  `AGENTS.md` 中“`Parallel` 目前不生效”一条改为新的语义。
+
+### WP3 GPU 求值支持（轻量，只改 Python 层）
+
+- 新增 `geatpy/_device.py` 的 `to_numpy(x)`：按类型鸭子识别，不主动 import torch / cupy。
+  torch 用 `.detach().cpu().numpy()`，cupy 用 `.get()`，CPU 上的 DLPack 对象用 `np.from_dlpack`，其余 `np.asarray`。
+- `Problem.evaluation` 在调用 `evalVars` / `aimFunc` 之后，把 `pop.ObjV`、`pop.CV` 中的张量转回 numpy；
+  `calReferObjV` 的返回值同样处理。这样 `Algorithm.call_aimFunc` 的格式检查无需改动。
+  属于“有意更宽松”（原版报 `ObjV is illegal`），写入 AGENTS.md 差异清单。
+- 修正 `Problem.evaluation` 的异常吞没：它用 `except RuntimeError` 判断“子类没有重写 aimFunc”，
   而 torch 的 CUDA 错误（显存不足、设备端断言）也是 `RuntimeError`，会被吞掉并误报
-  “aimFunc 和 evalVars 必须至少重写一个”。改为检查方法是否被重写（实例属性或子类方法），真实异常原样抛出。
-  对未重写两者的情况，报错信息保持不变。
-- 示例：`demo/gpu/`，一个 PyTorch 写的大规模单目标问题和一个多目标问题，CPU 可跑（`device='cpu'`）。
+  “aimFunc 和 evalVars 必须至少重写一个”。改为检查方法是否被重写（构造参数传入或子类方法），真实异常原样抛出；
+  两者都未重写时，报错信息保持不变。
+- 2.8.0 **不加** `Problem(device=...)` 参数：用户在 `evalVars` 开头自行 `torch.as_tensor(Vars, device=...)`，
+  一行即可，且 dtype、设备、多卡分配都由用户掌控。是否加该参数视反馈再定。
+- 示例：`demo/gpu/`，一个用 PyTorch 写目标函数的单目标问题和一个多目标问题，`device='cpu'` 也能跑。
+- 测试 `tests/test_device.py`（无需 GPU）：返回 torch(cpu) 张量、带 `__dlpack__` / `__array__` 的伪数组时的自动转换；
+  `aimFunc` 写回张量；`evaluation` 不再吞掉真实 `RuntimeError`；未安装 torch 时 import geatpy 不受影响。
+  CI 增加一个可选 job（ubuntu、Python 3.12，安装 CPU 版 torch）；没有 torch 的 job 跳过相关用例。
 
-### WP2 CPU 前置修复（不涉及 GPU）
+### WP4 基准、文档与发布
 
-- **mutde 的 O(N²)**：当前每个个体都构造长度 N 的候选池（`(0..n).filter(..).collect()` + `swap_remove`），
-  N=10000 时占总耗时 93%。改为对 3～5 个下标做拒绝采样：均匀、互不相同、`rows == n` 时排除自身；
-  候选不足（N 很小）时退化为与现在相同的有放回抽样。分布与现实现完全相同，只是随机序列不同。
-  按 AGENTS.md 用 `scripts/parity/fuzz/` 与 `scripts/parity/classic.py` 验证分布与解质量。
-- **rayon 确定性并行**（可选，视排期放 2.8.0 或 2.8.x）：让 `Parallel=True` 生效，默认仍为 False。
-  随机算子由 `crate::utils::rng()` 为每个固定大小的数据块派生种子，结果与线程数无关、`np.random.seed` 仍可复现；
-  确定性算子（ndsort、cdist、refselect 的关联步骤）并行前后逐位一致。
+- `scripts/bench/bench_core.py`：复现第 1 节两张表，并对 N ∈ {1k, 5k, 20k} 比较 1 线程与全部线程；
+  结果回填本文档，用于定阈值和写 README。
+- README / README.en 同步更新：性能数字、多核并行与线程数设置、“目标函数放到 GPU 上”的用法；`history.txt`；
+  版本号 2.8.0（commitizen 管理的三处）。
+- AGENTS.md：目录加入 `geatpy/_device.py`；更新“`Parallel` 不生效”与“有意更宽松”两条；
+  验证表加入“改了并行路径：多线程逐位比较”。
 
-### WP3 GPU 算子卸载（opt-in，torch 实现）
-
-只卸载 O(N²) 且结果确定的算子：
-
-| 算子 | GPU 做法 | 与 Rust 的一致性 |
-| --- | --- | --- |
-| `ndsortESS` / `ndsortTNS` | 分块广播计算支配矩阵（含 CV 约束支配、maxormins），按入度逐层剥离；支持 `needNum` / `needLevel` 提前停止，未分层个体为 inf | 只有比较运算，fp64 下**逐位一致** |
-| `cdist` | `'euclidean'` 用逐差平方分块计算（不用 `torch.cdist` 的 matmul 展开，避免抵消误差）；`'cosine'` 系列直接矩阵乘 | 相对误差 ≤ 1e-12，测试按容差比较 |
-| `refselect` | 只把“个体到参考向量的垂直距离与关联”放到 GPU；带随机性的小生境选择仍在 Rust | 关联在距离几乎相等时可能因舍入不同而翻转，按分布一致验收 |
-
-`refselect` 需要 Rust 侧拆出一个内部函数（如 `_refselect_niche`，接收关联结果，不对外文档化），其余算子 Rust 不动。
-`ndsortDED`、`crowdis`、变异/重组/选择均不卸载。
-
-分派规则（`geatpy/core/__init__.py`，在 `geatpy/__init__.py` 的 `from geatpy.core.X import X` 之前装好）：
-
-- 只有“规整调用”才卸载：ObjV 为二维 float ndarray、参数类型合法、N ≥ 阈值；
-  其它一切情况（list 输入、一维、非法参数等）交给 Rust，保证报错与返回类型和现在完全一致。
-- 返回类型与 Rust 相同（levels 为 float64 ndarray，maxLevel 为 int 等）。
-- 阈值 `min_size` 默认值由基准测试确定（预估 ndsort 在 2000～5000 之间），用户可覆盖。
-- torch 未安装 / 设备不可用：`enable()` 时报错；环境变量开启时警告一次并回退 CPU。
-- 支配矩阵按显存上限分块（默认单块 ≤ 256 MB），N 很大时不爆显存。
-- MPS 不支持 fp64：算子卸载只支持 CUDA / ROCm；MPS 仅用于 WP1 求值。
-
-### WP4 测试与基准
-
-- `tests/test_device.py`：不需要 GPU。覆盖 CPU 回退、torch(cpu) 张量与带 `__dlpack__` / `__array__`
-  的伪数组自动转换、`device` / `dtype` 设置后 `Vars` 的类型与设备、`aimFunc` 路径不变、
-  `evaluation` 不再吞掉真实 `RuntimeError`。
-- `tests/test_gpu_ops.py`：用 **torch 的 CPU 设备**跑 WP3 实现并与 Rust 对比（ndsort 逐位一致、cdist 容差、
-  refselect 统计口径同 `test_core_parity.py`），无 GPU 的 CI 也能覆盖正确性；`cuda` 用例加 `pytest.mark.gpu`，无卡时跳过。
-- CI：ci.yml 增加一个可选 job（ubuntu、Python 3.12，安装 CPU 版 torch）跑上述两组测试；原测试矩阵不变。
-- `scripts/bench/gpu_bench.py`：复现第 1 节表格，并对 N ∈ {1k, 5k, 20k, 50k} 比较 CPU 与 GPU 的算子耗时与端到端耗时；
-  在 CUDA 机器上手动运行，结果回填本文档，用于确定默认阈值。
-- 原有 parity 测试、fuzz、`classic.py` 在默认（GPU 关闭）配置下必须不变。
-
-### WP5 文档与发布
-
-- README / README.en 增加“GPU 加速”一节（两者同步）；`history.txt`；版本号 2.8.0（commitizen 管理的三处）。
-- 可选依赖：`geatpy-rs[torch]`（带 `python_version >= "3.9"` 标记，torch 已不支持 3.8）；
-  CuPy 不设 extra，由用户按 CUDA 版本安装 `cupy-cuda12x` 等。
-- AGENTS.md：目录加入 `geatpy/_device.py`、`geatpy/gpu/`；验证表加入“改了 GPU 路径”一行；
-  “有意更宽松”加入 ObjV/CV 接受张量。
-
-## 4. 兼容性与风险
+## 3. 风险与对策
 
 | 风险 | 对策 |
 | --- | --- |
-| GPU 路径改变默认输出 | 默认关闭；关闭时不 import torch，不经过新代码 |
-| GPU 与 CPU 结果不一致 | 只卸载确定性算子；ndsort 逐位一致，cdist 设容差，refselect 统计验收 |
-| 随机可复现性 | GPU 算子不消耗随机数；refselect 的随机部分留在 Rust，仍由 `np.random.seed` 控制 |
-| 小种群反而变慢 | 阈值分派，小于阈值走 Rust |
-| 显存不足 | 分块；OOM 时报错（不再被 evaluation 吞掉） |
-| fp32 / MPS 精度 | 求值可用 fp32（用户显式选择）；算子卸载只用 fp64 |
-| Python 3.8 | GPU 功能要求 3.9+，3.8 下核心功能照旧 |
-| torch 导入耗时 | 懒加载，只在设置 `device` 或 `enable()` 时导入 |
+| 并行改变确定性算子结果 | 只用不改变运算顺序的并行（按行 / 按块，每个输出元素的计算仍串行）；测试逐位比较 |
+| 并行破坏随机可复现性 | 种子按固定块派生，与线程数无关；默认 `Parallel=False` 时与 2.7.3 序列相同 |
+| 小规模反而变慢 | 每个算子单独设阈值；`ea.set_num_threads(1)` 可完全关闭 |
+| 与用户自己的多进程 / 多线程争抢核心 | 提供线程数设置，README 说明 |
+| `mutde` 随机序列变化 | 分布不变，fuzz 与 classic 验证；在 history 中说明同种子结果与 2.7.x 不同 |
 
-## 5. 里程碑
+## 4. 里程碑
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| M1 | WP2 mutde 修复 + WP1 求值 + 示例 | 全部测试通过；fuzz / classic 无异常；DE N=10000 提速 ≥ 10× |
-| M2 | WP3 ndsort、cdist + 分派层 + 基准脚本 | torch(cpu) 对比测试通过；CUDA 机器上的基准数据回填，确定阈值 |
-| M3 | WP3 refselect、WP4 CI job、WP5 文档，发布 2.8.0 | 同上；README 双语同步 |
-| 可选 | WP2 rayon 并行 | 并行前后确定性算子逐位一致，随机算子 fuzz / classic 通过 |
+| M1 | WP1 `mutde` 修复 + WP3 GPU 求值 | 全部测试通过；fuzz / classic 无异常；DE N=10000 提速 ≥ 10 倍 |
+| M2 | WP2 并行框架 + `refselect` / `cdist` 并行 + 基准脚本 | 多线程逐位一致；NSGA-III 大种群提速数据回填 |
+| M3 | WP2 `ndsort` 并行实验 + 随机算子并行；WP4 文档，发布 2.8.0 | 同上；README 双语同步 |
 
-## 6. 后续（2.9 预研）
+## 附录 A：GPU 算子卸载（暂缓）
 
-- 种群常驻 GPU 的独立模板（`geatpy.gpu` 下的 NSGA-II / NSGA-III / DE，RI 编码），用户的 `evalVars`
-  直接接收与返回张量，整代不回主机；参考 EvoX、EvoTorch 的向量化写法。
-- 是否做取决于 2.8.0 的使用反馈与基准：只有 N 上万、目标函数也在 GPU 上时才有明显收益。
+重启条件：有用户在 N 上万的规模下使用，且 WP2 并行后内核仍是瓶颈；先在 CUDA 机器上跑基准确认收益。
 
-## 7. 待确认
+设计要点（评审前的方案，供重启时参考）：
 
-1. 2.8.0 范围：建议 WP1 + WP2(mutde) + WP3（ndsort、cdist 必做，refselect 视进度）；rayon 是否纳入。
-2. 算子后端只用 PyTorch（建议）；CuPy 只支持求值。
-3. API 命名：`Problem(device=, dtype=)` 与 `ea.gpu.enable()`。
+- `ea.gpu.enable(device='cuda', min_size=None)` 全局开启，默认关闭；在 `geatpy/core/__init__.py` 的分派层，
+  只对“规整调用”（二维 float ndarray、参数合法、N ≥ 阈值）走 torch 实现，其余交给 Rust，保证报错和返回类型不变。
+- 只卸载确定性的 O(N²) 算子：`ndsortESS` / `ndsortTNS`（分块支配矩阵 + 逐层剥离，fp64 下逐位一致）、
+  `refselect` 的关联步骤（随机部分留在 Rust）。`cdist` 的 N×N 结果需回传主机，不卸载。
+- MPS 不支持 fp64，只支持 CUDA / ROCm；正确性测试用 torch 的 CPU 设备与 Rust 对比，无卡 CI 也能覆盖。
+
+## 附录 B：种群常驻 GPU 的算法模板（远期预研）
+
+在 `geatpy.gpu` 下提供 NSGA-II / NSGA-III / DE（RI 编码）的 torch 版模板，`evalVars` 直接接收与返回张量，
+整代不回主机；参考 EvoX、EvoTorch 的向量化写法。只有 N 上万、目标函数也在 GPU 上时才有明显收益，视需求再定。
