@@ -817,13 +817,20 @@ fn unit_rows(x: &Array2<f64>) -> Array2<f64> {
     u
 }
 
-/// One entry of numpy `a @ b.T` for float64 matrices: OpenBLAS dgemm accumulates the products in
-/// order as a chain of fused multiply-adds starting from zero.
-fn dot_fma(a: ArrayView1<f64>, b: ArrayView1<f64>) -> f64 {
-    match (a.as_slice(), b.as_slice()) {
-        (Some(x), Some(y)) => crate::utils::dot_fma(x, y),
-        _ => crate::utils::dot_fma(&a.to_vec(), &b.to_vec()),
-    }
+/// Row `i` of numpy `a @ b.T` for float64 matrices (see `utils::dot_fma_rows`).
+fn matmul_row(a: &Array2<f64>, i: usize, b: &Array2<f64>, out: &mut [f64]) {
+    let x = a.row(i);
+    let x = x.as_slice().expect("owned arrays are contiguous");
+    let rows = b.as_slice().expect("owned arrays are contiguous");
+    crate::utils::dot_fma_rows(x, rows, out);
+}
+
+/// numpy's error for `a @ b.T` when `a` has `m` columns and `b` has `mb`, as geatpy 2.7.0 raises it.
+fn matmul_mismatch(mb: usize, m: usize) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "matmul: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature \
+         (n?,k),(k,m?)->(n?,m?) (size {mb} is different from {m})"
+    ))
 }
 
 /// numpy's float64 `np.sum` along a contiguous axis (pairwise summation with 8 accumulators).
@@ -1027,14 +1034,16 @@ pub fn refselect<'py>(
     // integer objectives) break the same way: rows are normalised first and multiplied with numpy
     // `@` (an FMA chain in OpenBLAS), then each individual goes to the first reference point with
     // the smallest 1 - cos^2, and d = sqrt(|c|^2 (1 - cos^2)) is NaN when roundoff makes it negative.
+    if z.shape()[1] != m {
+        return Err(matmul_mismatch(z.shape()[1], m));
+    }
     let (cu, zu) = (unit_rows(&c), unit_rows(&z));
     let mut pi = vec![0usize; rows.len()];
     let mut d = vec![0.0; rows.len()];
+    let mut cos = vec![0.0; nz];
     for r in 0..rows.len() {
-        let one_minus_cos2 = |k: usize| {
-            let cos = dot_fma(cu.row(r), zu.row(k));
-            1.0 - cos * cos
-        };
+        matmul_row(&cu, r, &zu, &mut cos);
+        let one_minus_cos2 = |k: usize| 1.0 - cos[k] * cos[k];
         let (best, cm) = (1..nz).fold((0, one_minus_cos2(0)), |b, k| {
             let v = one_minus_cos2(k);
             if v < b.1 {
@@ -1108,7 +1117,7 @@ pub fn refgselect<'py>(
     crate::utils::unify_objectives(&mut obj, maxormins)?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
     // Rounded like geatpy 2.7.0 throughout: minima start from the first value and take only a
-    // strictly smaller one, cosines are normalised rows multiplied as numpy `@` (see `dot_fma`).
+    // strictly smaller one, cosines are normalised rows multiplied as numpy `@` (see `matmul_row`).
     for j in 0..m {
         let col = obj.column(j);
         let mn = col
@@ -1146,14 +1155,9 @@ pub fn refgselect<'py>(
             // cosine between reference vectors with the diagonal zeroed; an exact 1 (a repeated
             // vector) is zeroed too, with the original's warning
             let mut cvv = Array2::<f64>::zeros((nv, nv));
-            for i in 0..nv {
-                for k in 0..nv {
-                    cvv[[i, k]] = if i == k {
-                        0.0
-                    } else {
-                        dot_fma(vu.row(i), vu.row(k))
-                    };
-                }
+            for (i, mut row) in cvv.rows_mut().into_iter().enumerate() {
+                matmul_row(&vu, i, &vu, row.as_slice_mut().unwrap());
+                row[i] = 0.0;
             }
             if cvv.iter().any(|&x| x == 1.0) {
                 PyErr::warn(
@@ -1177,10 +1181,18 @@ pub fn refgselect<'py>(
                 .collect()
         }
     };
+    if v.shape()[1] != m {
+        return Err(matmul_mismatch(v.shape()[1], m));
+    }
     let ou = unit_rows(&obj);
     let norm: Vec<f64> = obj.rows().into_iter().map(|r| sq_norm(r).sqrt()).collect();
     // cosine distance 1 - cos; each individual goes to the first reference vector with the smallest
-    let cos_dist = Array2::from_shape_fn((n, nv), |(i, k)| 1.0 - dot_fma(ou.row(i), vu.row(k)));
+    let mut cos_dist = Array2::<f64>::zeros((n, nv));
+    for (i, mut row) in cos_dist.rows_mut().into_iter().enumerate() {
+        let out = row.as_slice_mut().unwrap();
+        matmul_row(&ou, i, &vu, out);
+        out.iter_mut().for_each(|x| *x = 1.0 - *x);
+    }
     let assoc: Vec<usize> = (0..n)
         .map(|i| {
             (1..nv)
