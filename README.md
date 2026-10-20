@@ -102,6 +102,9 @@ pip install geatpy-rs
 
 > 💡 **提示**：分发包名为 `geatpy-rs`，在 Python 代码中完全无需改动，继续沿用熟悉的 **`import geatpy as ea`** 即可无缝调用！
 
+> 🧪 **预览版**：2.8.0b1 是多线程预览版（不含 GPU），`pip install` 默认仍安装 2.7.4 稳定版，试用请加 `--pre`：
+> `pip install --pre geatpy-rs`。
+
 ### 方式二：从 GitHub Releases 下载预编译 Wheel
 
 前往 [Releases 页面](https://github.com/yangyachao/geatpy/releases) 下载对应系统的 Wheel 文件，或通过链接一键安装：

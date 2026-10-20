@@ -124,6 +124,9 @@ pip install geatpy-rs
 
 > 💡 **Note**: the distribution is named `geatpy-rs`, but nothing changes in your code: keep using **`import geatpy as ea`**.
 
+> 🧪 **Preview**: 2.8.0b1 is the multithreading preview (no GPU support). `pip install` still installs the 2.7.4 stable
+> release; add `--pre` to try it: `pip install --pre geatpy-rs`.
+
 ### Option 2: prebuilt wheels from GitHub Releases
 
 Download the wheel for your platform from the [Releases page](https://github.com/yangyachao/geatpy/releases), or install it directly:
