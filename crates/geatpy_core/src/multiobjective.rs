@@ -122,26 +122,26 @@ pub fn ndsortDED<'py>(
     )
 }
 
-/// Most unranked rows a front pass handles at a time: the serial head that estimates the front
-/// size, then each block of the parallel pass.
+/// Unranked rows a front pass takes at a time; a block is checked in parallel or serially.
 const FRONT_CHUNK: usize = 1024;
 /// Unique rows from which non-dominated sorting may run in parallel.
 const FRONT_PAR_MIN_ROWS: usize = 512;
-
-/// A pass goes parallel when its expected front size times the objectives compared reaches this.
-const FRONT_PAR_MIN_WORK: usize = 1024;
+/// A block goes parallel once the front found so far times the objectives compared reaches this:
+/// a row that joins the front is compared with all of it, so below this a block is cheap anyway.
+const FRONT_PAR_MIN_WORK: usize = 2048;
 
 /// Efficient non-dominated sort, one complete front per pass. `pts` holds objectives 2..M (`w` of
 /// them) of the unique rows sorted lexicographically, `rep` their multiplicities. Returns the level
-/// of every unique row (0 = unranked) and the last level visited.
+/// of every unique row (0 = unranked) and the last level visited. NaN-free input only.
 ///
 /// Only earlier rows can dominate a row (the first objective is sorted), and uniqueness turns
-/// weak dominance into dominance. A row joins the front iff no earlier row of the front dominates
-/// it, which (dominance being transitive) is the same as: no earlier unranked row dominates it.
-/// The parallel pass relies on that: a block of rows is checked against the front found before the
-/// block plus the earlier unranked rows of the block, so it finds exactly the serial front. It
-/// only pays when the front is large (each row is checked against all of it), so every pass starts
-/// serially and goes parallel once its first rows predict a large front.
+/// weak dominance into dominance. A row joins the front iff no earlier front member dominates it.
+/// With two objectives (`w` = 1) the second objective strictly decreases along a front, so only
+/// its last member needs checking. Otherwise the rows go in blocks: a block is checked serially,
+/// or, once the front is large, in two parallel steps: drop the candidates the front before the
+/// block dominates, then keep each survivor no earlier survivor dominates. A candidate dominated
+/// by a dropped one is dominated by the front too (dominance is transitive), so this finds exactly
+/// the serial front with the same comparisons.
 fn front_levels(
     pts: &[f64],
     w: usize,
@@ -153,9 +153,14 @@ fn front_levels(
     let u = rep.len();
     let row = |i: usize| &pts[i * w..(i + 1) * w];
     let dominates = |j: usize, i: usize| row(j).iter().zip(row(i)).all(|(a, b)| a <= b);
-    let pool = crate::parallel::pool_for(u, FRONT_PAR_MIN_ROWS);
+    let pool = if w > 1 {
+        crate::parallel::pool_for(u, FRONT_PAR_MIN_ROWS)
+    } else {
+        None
+    };
     // blocks small enough to give every thread a share of a front pass
-    let chunk = (u / (2 * crate::parallel::num_threads())).clamp(64, FRONT_CHUNK);
+    let threads = crate::parallel::num_threads().max(1);
+    let chunk = (u / threads.saturating_mul(2)).clamp(64, FRONT_CHUNK);
     let mut lv = vec![0usize; u];
     let mut cri_level = 0usize;
     let mut sums = 0usize;
@@ -163,53 +168,65 @@ fn front_levels(
         return (lv, cri_level);
     }
     let mut front: Vec<usize> = Vec::new();
-    let mut left = u; // unranked rows
+    let mut cand: Vec<usize> = Vec::with_capacity(chunk);
     loop {
         cri_level += 1;
         if cri_level > max_level {
             break;
         }
         front.clear();
-        let serial_from = |from: usize, front: &mut Vec<usize>, limit: usize| -> (usize, usize) {
-            let (mut i, mut seen) = (from, 0);
-            while i < u && seen < limit {
-                if lv[i] == 0 {
-                    seen += 1;
-                    if !front.iter().rev().any(|&j| dominates(j, i)) {
-                        front.push(i);
-                    }
+        if w == 1 {
+            for (i, &l) in lv.iter().enumerate() {
+                if l == 0 && front.last().is_none_or(|&j| !dominates(j, i)) {
+                    front.push(i);
                 }
-                i += 1;
             }
-            (i, seen)
-        };
-        let (next, seen) = serial_from(0, &mut front, chunk);
-        let expected = front.len() * left / seen.max(1);
-        match pool
-            .as_deref()
-            .filter(|_| expected * w >= FRONT_PAR_MIN_WORK && left > 2 * chunk)
-        {
-            None => {
-                serial_from(next, &mut front, usize::MAX);
-            }
-            Some(p) => {
-                let mut start = next;
-                while start < u {
-                    let mut cand = Vec::with_capacity(chunk);
-                    while start < u && cand.len() < chunk {
-                        if lv[start] == 0 {
-                            cand.push(start);
-                        }
-                        start += 1;
+        } else {
+            let mut start = 0;
+            while start < u {
+                cand.clear();
+                while start < u && cand.len() < chunk {
+                    if lv[start] == 0 {
+                        cand.push(start);
                     }
-                    let earlier = &front;
-                    let keep = crate::parallel::map_collect(Some(p), cand.len(), |t| {
-                        let i = cand[t];
-                        // nearby rows first: a dominated row is usually dominated by one of them
-                        !cand[..t].iter().rev().any(|&j| dominates(j, i))
-                            && !earlier.iter().rev().any(|&j| dominates(j, i))
-                    });
-                    front.extend(cand.iter().zip(keep).filter(|(_, k)| *k).map(|(&i, _)| i));
+                    start += 1;
+                }
+                match pool
+                    .as_deref()
+                    .filter(|_| front.len() * w >= FRONT_PAR_MIN_WORK)
+                {
+                    None => {
+                        for &i in &cand {
+                            if !front.iter().rev().any(|&j| dominates(j, i)) {
+                                front.push(i);
+                            }
+                        }
+                    }
+                    Some(p) => {
+                        let earlier = &front;
+                        let open = crate::parallel::map_collect(Some(p), cand.len(), |t| {
+                            !earlier.iter().rev().any(|&j| dominates(j, cand[t]))
+                        });
+                        let survivors: Vec<usize> = cand
+                            .iter()
+                            .zip(open)
+                            .filter(|(_, o)| *o)
+                            .map(|(&i, _)| i)
+                            .collect();
+                        let keep = crate::parallel::map_collect(Some(p), survivors.len(), |t| {
+                            !survivors[..t]
+                                .iter()
+                                .rev()
+                                .any(|&j| dominates(j, survivors[t]))
+                        });
+                        front.extend(
+                            survivors
+                                .iter()
+                                .zip(keep)
+                                .filter(|(_, k)| *k)
+                                .map(|(&i, _)| i),
+                        );
+                    }
                 }
             }
         }
@@ -217,7 +234,6 @@ fn front_levels(
             lv[i] = cri_level;
             sums += rep[i];
         }
-        left -= front.len();
         if sums >= nums || sums >= n {
             break;
         }
@@ -617,7 +633,7 @@ pub fn crowdis<'py>(
 }
 
 /// Output elements x dimensions from which cdist runs in parallel.
-const CDIST_PAR_MIN_WORK: usize = 1 << 16;
+const CDIST_PAR_MIN_WORK: usize = 1 << 18;
 
 /// Pairwise distances between the rows of A and B: 'euclidean', 'cityblock',
 /// 'cosine' (1 - cosine similarity) or 'cosine_similarity'.
@@ -708,10 +724,9 @@ fn pairwise<F>(
         out.fill(dist(&[], &[]));
         return;
     }
-    let rows_b: Vec<&[f64]> = b.chunks_exact(dim).collect();
-    crate::parallel::for_each_row(pool, out, rows_b.len(), |i, out_row| {
+    crate::parallel::for_each_row(pool, out, b.len() / dim, |i, out_row| {
         let x = &a[i * dim..(i + 1) * dim];
-        for (o, y) in out_row.iter_mut().zip(&rows_b) {
+        for (o, y) in out_row.iter_mut().zip(b.chunks_exact(dim)) {
             *o = dist(x, y);
         }
     });
@@ -995,13 +1010,17 @@ fn matmul_mismatch(mb: usize, m: usize) -> PyErr {
     ))
 }
 
+/// Multiply-adds from which `dot_matrix` runs in parallel: in refgselect the association and
+/// selection that follow stay serial, so the product alone has to outweigh the hand-off.
+const DOT_MATRIX_PAR_MIN_WORK: usize = 1 << 20;
+
 /// `f` applied to every entry of numpy `a @ b.T` (rows as in `matmul_row`; `a` and `b` have the
 /// same number of columns), computed by rows on the thread pool when the matrix is large. Every
 /// row is computed independently, so the result does not depend on the number of threads.
 fn dot_matrix(a: &Array2<f64>, b: &Array2<f64>, f: impl Fn(f64) -> f64 + Sync) -> Array2<f64> {
     let (n, nb, d) = (a.shape()[0], b.shape()[0], a.shape()[1]);
     let mut out = Array2::<f64>::zeros((n, nb));
-    let pool = crate::parallel::pool_for(n * nb * d, CDIST_PAR_MIN_WORK);
+    let pool = crate::parallel::pool_for(n * nb * d, DOT_MATRIX_PAR_MIN_WORK);
     let flat = out.as_slice_mut().expect("owned arrays are contiguous");
     crate::parallel::for_each_row(pool.as_deref(), flat, nb, |i, row| {
         matmul_row(a, i, b, row);
@@ -1249,9 +1268,8 @@ pub fn refselect<'py>(
     // the smallest 1 - cos^2, and d = sqrt(|c|^2 (1 - cos^2)) is NaN when roundoff makes it negative.
     // Rows are independent, so they are associated in parallel when there are enough of them.
     let (cu, zu) = (unit_rows(&c), unit_rows(&z));
-    let assoc = |r: usize| -> (usize, f64) {
-        let mut cos = vec![0.0; nz];
-        matmul_row(&cu, r, &zu, &mut cos);
+    let assoc = |cos: &mut Vec<f64>, r: usize| -> (usize, f64) {
+        matmul_row(&cu, r, &zu, cos);
         let one_minus_cos2 = |k: usize| 1.0 - cos[k] * cos[k];
         let (best, cm) = (1..nz).fold((0, one_minus_cos2(0)), |b, k| {
             let v = one_minus_cos2(k);
@@ -1265,7 +1283,7 @@ pub fn refselect<'py>(
     };
     let pool = crate::parallel::pool_for(rows.len() * nz * m, REFSELECT_PAR_MIN_WORK);
     let (pi, d): (Vec<usize>, Vec<f64>) =
-        crate::parallel::map_collect(pool.as_deref(), rows.len(), assoc)
+        crate::parallel::map_collect_init(pool.as_deref(), rows.len(), || vec![0.0; nz], assoc)
             .into_iter()
             .unzip();
     let mut rho = vec![0usize; nz];

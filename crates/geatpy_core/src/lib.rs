@@ -117,6 +117,8 @@ fn _geatpy_core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // 7. Threads used by the parallel operators
     m.add_function(wrap_pyfunction!(set_num_threads, m)?)?;
     m.add_function(wrap_pyfunction!(get_num_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(_parallel_calls, m)?)?;
+    parallel::register_fork_handlers(py)?;
 
     // Plotting (moeaplot, soeaplot, trcplot, varplot) lives in geatpy/core/_plot.py.
 

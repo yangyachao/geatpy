@@ -33,7 +33,7 @@ fn pair(
 
 /// Distance evaluations x objectives from which GD, IGD and Spacing run in parallel; the per-row
 /// minima are computed in parallel and summed in order, so the result does not change.
-const INDICATOR_PAR_MIN_WORK: usize = 1 << 16;
+const INDICATOR_PAR_MIN_WORK: usize = 1 << 18;
 
 /// Euclidean distance summed left to right like geatpy 2.7.0's `_cdist_eu` (0.0 for no columns).
 fn dist(a: &Array2<f64>, i: usize, b: &Array2<f64>, k: usize) -> f64 {
@@ -51,6 +51,27 @@ fn nearest(a: &Array2<f64>, i: usize, b: &Array2<f64>) -> f64 {
     (0..b.shape()[0])
         .map(|k| dist(a, i, b, k))
         .fold(f64::NAN, f64::min)
+}
+
+/// Sum of `term(nearest distance of row i of a to b)` over the rows of `a`, in row order. With a
+/// pool the distances are found in parallel and collected first; serially nothing is collected.
+fn sum_nearest(a: &Array2<f64>, b: &Array2<f64>, term: impl Fn(f64) -> f64) -> f64 {
+    let (n, m) = (a.shape()[0], a.shape()[1]);
+    if m == 0 {
+        // every distance is 0 (no objectives), or infinite to an empty set
+        let d = if b.shape()[0] == 0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        return if n == 0 { 0.0 } else { term(d) * n as f64 };
+    }
+    match crate::parallel::pool_for(n * b.shape()[0] * m, INDICATOR_PAR_MIN_WORK) {
+        Some(pool) => crate::parallel::map_collect(Some(&pool), n, |i| nearest(a, i, b))
+            .into_iter()
+            .fold(0.0, |s, d| s + term(d)),
+        None => (0..n).fold(0.0, |s, i| s + term(nearest(a, i, b))),
+    }
 }
 
 /// Generational distance as geatpy 2.7.0 computes it: the norm of the nearest distances (squared
@@ -73,9 +94,7 @@ pub fn GD(
             "float division by zero",
         ));
     }
-    let pool = crate::parallel::pool_for(n * r.shape()[0] * p.shape()[1], INDICATOR_PAR_MIN_WORK);
-    let near = crate::parallel::map_collect(pool.as_deref(), n, |i| nearest(&p, i, &r));
-    let s = near.iter().fold(0.0, |s, d| s + d * d);
+    let s = sum_nearest(&p, &r, |d| d * d);
     Ok(s.sqrt() / n as f64)
 }
 
@@ -88,9 +107,7 @@ pub fn IGD(ObjV: &Bound<'_, PyAny>, PF: &Bound<'_, PyAny>, Parallel: Opt) -> PyR
     let (p, r) = pair(ObjV, PF, "IGD")?;
     let nr = r.shape()[0];
     // the mean over no PF points is NaN, as in the original
-    let pool = crate::parallel::pool_for(p.shape()[0] * nr * p.shape()[1], INDICATOR_PAR_MIN_WORK);
-    let near = crate::parallel::map_collect(pool.as_deref(), nr, |k| nearest(&r, k, &p));
-    let s = near.iter().fold(0.0, |s, d| s + d);
+    let s = sum_nearest(&r, &p, |d| d);
     Ok(s / nr as f64)
 }
 

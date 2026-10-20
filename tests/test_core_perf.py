@@ -38,15 +38,17 @@ def test_mutde_donors_are_distinct_uniform_and_exclude_the_target():
     diffs = _donors(n, reps)
     target = np.tile(np.arange(n), reps)
     assert np.all(diffs != 0)  # the two difference donors are never the same row
-    counts = np.zeros((n, n))
+    first, second = np.zeros((n, n)), np.zeros((n, n))
     for i, d in zip(target, diffs):
         b, c = _pair(d)
         assert b != i and c != i
-        counts[i, b] += 1
-    # every other row is equally likely: reps / (n - 1) ~ 428.6 draws each, sd ~ 19
+        first[i, b] += 1
+        second[i, c] += 1
+    # every other row is equally likely for both donors: reps / (n - 1) ~ 428.6 draws each, sd ~ 19
     expected = reps / (n - 1)
-    off = counts[~np.eye(n, dtype=bool)]
-    assert np.all(np.abs(off - expected) < 6 * np.sqrt(expected))
+    for counts in (first, second):
+        off = counts[~np.eye(n, dtype=bool)]
+        assert np.all(np.abs(off - expected) < 6 * np.sqrt(expected))
 
 
 def test_mutde_refills_the_donor_pool_when_donors_run_out():
@@ -65,13 +67,19 @@ def test_mutde_with_more_offspring_than_rows_draws_from_every_row():
     chrom = (2.0 ** np.arange(n)).reshape(-1, 1)
     field = np.array([[-2.0 ** 40], [2.0 ** 40], [0]])
     seen = set()
-    for _ in range(300):
+    own = np.zeros(n)
+    reps = 1000
+    for _ in range(reps):
         trial = ea.mutde('RI', chrom, field, [np.zeros(2 * n, dtype=int), None, None], 1.0, 1, 2 * n)
         assert trial.shape == (2 * n, 1)
-        for d in trial[:, 0] - 1.0:
+        for i, d in enumerate(trial[:, 0] - 1.0):
             b, c = _pair(d)
             seen.update((b, c))
+            if i < n:
+                own[i] += i in (b, c)
     assert seen == set(range(n))
+    # row i is not excluded: it is one of the 2 donors drawn from n = 4 rows half of the time
+    assert np.all(np.abs(own / reps - 2 / n) < 0.06)
 
 
 def _front(rs, n, m):
@@ -83,14 +91,16 @@ def _parallel_cases():
     """Deterministic operators on inputs large enough to take their parallel paths."""
     rs = np.random.RandomState(0)
     o3, o5 = _front(rs, 6000, 3), _front(rs, 1500, 5)
-    dup = np.round(rs.rand(5000, 4) * 5) / 5
     cv = rs.rand(6000, 2) - 0.8
     lv, cri = ea.ndsortESS(o3[:3000], 1500)
     ref = ea.crtup(3, 1500)[0]
     yield 'ndsortESS', lambda: ea.ndsortESS(o3)
     yield 'ndsortESS_need', lambda: ea.ndsortESS(o5, 700)
-    yield 'ndsortTNS_cv', lambda: ea.ndsortTNS(o3, 6000, None, cv, [1, -1, 1])
-    yield 'ndsortDED_dup', lambda: ea.ndsortDED(dup)
+    # a large front after maxormins flips the second objective, with a few infeasible rows
+    flipped, few_cv = o3 * [1, -1, 1], rs.rand(6000, 1) - 0.97
+    yield 'ndsortTNS_cv', lambda: ea.ndsortTNS(flipped, 6000, None, few_cv, [1, -1, 1])
+    # a large front with tied coordinates (each value shared by about 32 rows) and duplicate rows
+    yield 'ndsortDED_dup', lambda: ea.ndsortDED(np.round(o3 * 200) / 200)
     yield 'refselect', lambda: ea.refselect(o3[:3000], lv, cri, 1500, ref)
     yield 'refgselect', lambda: ea.refgselect(o3[:3000], ref, 2.0, cv[:3000])
     for metric in ('euclidean', 'cityblock', 'cosine', 'cosine_similarity'):
@@ -104,17 +114,25 @@ def _same(a, b):
     if isinstance(a, tuple):
         return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
     if isinstance(a, np.ndarray):
-        return a.dtype == b.dtype and np.array_equal(a, b, equal_nan=True)
+        # np.array_equal(equal_nan=True) needs numpy 1.19; compare the bits instead
+        return a.dtype == b.dtype and a.shape == b.shape and a.tobytes() == b.tobytes()
     return type(a) is type(b) and (a == b or (a != a and b != b))
 
 
 def test_parallel_paths_match_the_serial_ones_bit_for_bit():
+    from geatpy.core import _geatpy_core as core
     try:
         results = []
         for threads in (1, 4, 3):
             ea.set_num_threads(threads)
-            assert ea.get_num_threads() == threads
-            results.append({name: f() for name, f in _parallel_cases()})
+            assert 1 <= ea.get_num_threads() <= threads  # capped at the number of CPUs
+            out = {}
+            for name, f in _parallel_cases():
+                before = core._parallel_calls()
+                out[name] = f()
+                if ea.get_num_threads() > 1:
+                    assert core._parallel_calls() > before, name + ' never went parallel'
+            results.append(out)
     finally:
         ea.set_num_threads(None)
     for name in results[0]:
@@ -126,7 +144,10 @@ def test_set_num_threads_none_restores_the_default():
     default = ea.get_num_threads()
     assert default >= 1
     ea.set_num_threads(2)
-    assert ea.get_num_threads() == 2
+    assert 1 <= ea.get_num_threads() <= 2
+    ea.set_num_threads(2 ** 63)  # capped at the number of CPUs instead of overflowing
+    assert 1 <= ea.get_num_threads() < 2 ** 16
+    assert ea.ndsortESS(np.random.rand(10, 3))[1] >= 1
     ea.set_num_threads(None)
     assert ea.get_num_threads() == default
     ea.set_num_threads(0)
