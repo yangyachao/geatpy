@@ -42,6 +42,12 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 | **多核并行与性能** | C OpenMP 并行 | 非支配排序、参考点选择、距离与 GD/IGD/Spacing 指标在大规模时自动多线程（结果与单线程逐位一致，`ea.set_num_threads()` / `GEATPY_NUM_THREADS` 设置线程数），其余算子单线程（`Parallel` 参数为兼容保留，不生效）；36 个经典用例耗时为原版的 0.21~1.02 倍 |
 | **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与 42 个算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
 
+> **多线程说明**：默认线程数为逻辑 CPU 数（设置的线程数也不会超过它）。同时运行多个 geatpy 进程时（批量任务、
+> `multiprocessing`、`ProcessPoolExecutor`、joblib），请在每个进程中设 `GEATPY_NUM_THREADS=1` 或调用
+> `ea.set_num_threads(1)`（或给每个进程“核数 / 进程数”个线程），否则线程争抢核心反而更慢。每个工作线程会预留约
+> 66 MB 虚拟地址空间，在 `ulimit -v` 限制下请用 1 个线程或设 `MALLOC_ARENA_MAX=1`。“与单线程逐位一致”以默认浮点环境
+> 为前提：若其他库打开了 flush-to-zero（如 `torch.set_flush_denormal(True)`），含次正规数的输入在多线程下可能不同。
+
 ---
 
 ## ✅ 与官方 2.7.0 内核的一致性 (Parity)

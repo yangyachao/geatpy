@@ -23,6 +23,7 @@ CASES = [
     ('NSGA2_N100', 'moea_NSGA2_templet', 'DTLZ2', 100, 300),
     ('NSGA2_N1000', 'moea_NSGA2_templet', 'DTLZ2', 1000, 60),
     ('NSGA2_N5000', 'moea_NSGA2_templet', 'DTLZ2', 5000, 12),
+    ('NSGA2_ZDT1_N1000', 'moea_NSGA2_templet', 'ZDT1', 1000, 100),  # two objectives, one big front
     ('NSGA3_N105', 'moea_NSGA3_templet', 'DTLZ2', 105, 300),
     ('NSGA3_N1035', 'moea_NSGA3_templet', 'DTLZ2', 1035, 40),
     ('NSGA3_N5050', 'moea_NSGA3_templet', 'DTLZ2', 5050, 10),
@@ -36,7 +37,8 @@ def run(case):
     import geatpy as ea
     name, templet, prob, n, gens = case
     np.random.seed(0)
-    problem = ea.benchmarks.DTLZ2(M=3, Dim=12) if prob == 'DTLZ2' else ea.benchmarks.Rastrigrin(Dim=30)
+    problem = {'DTLZ2': lambda: ea.benchmarks.DTLZ2(M=3, Dim=12), 'ZDT1': lambda: ea.benchmarks.ZDT1(),
+               'Rastrigrin': lambda: ea.benchmarks.Rastrigrin(Dim=30)}[prob]()
     algorithm = getattr(ea, templet)(problem, ea.Population(Encoding='RI', NIND=n), MAXGEN=gens, logTras=0)
     profiler = cProfile.Profile()
     start = time.perf_counter()
@@ -48,7 +50,10 @@ def run(case):
     evals = sum(v[3] for k, v in stats.items() if k[2] == 'evalVars')  # cumulative time
     core = {}
     for (path, _, func), v in stats.items():
-        if path == '~' and func.startswith('<built-in method ') and '_geatpy_core.' in func:
+        # operators show up as "<built-in method _geatpy_core.ndsortESS>", the indicators (always run
+        # at the end of ea.optimize for M > 1) as "<built-in method indicator.HV>"
+        if path == '~' and (func.startswith('<built-in method indicator.')
+                            or (func.startswith('<built-in method ') and '_geatpy_core.' in func)):
             fn = func.rstrip('>').rsplit('.', 1)[-1]
             core[fn] = core.get(fn, 0) + v[2]
     core_total = sum(core.values())

@@ -71,8 +71,9 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 - 整数输出一律 int32（与原版一致）；例外是原版用 numpy 实现的 `crtbp`、`urs`、`ecs`、Nsel = N 的 `otos`（int64），
   以及长度 < 2 的排列染色体原样返回。
 - 算子的 `Parallel` 参数不生效。多线程由内核自动决定：确定性算子（ndsort*、refselect、refgselect、cdist、GD/IGD/Spacing）
-  在规模超过阈值时用 rayon 并行，结果与串行逐位一致；随机算子一律串行（实测收益很小，且要保持随机序列不变）。
-  线程数由 `GEATPY_NUM_THREADS` 或 `ea.set_num_threads()` 控制。
+  在规模超过阈值时用 rayon 并行，结果与串行逐位一致（以默认浮点环境为前提：工作线程沿用建池线程的 FTZ/DAZ）；
+  随机算子一律串行（实测收益很小，且要保持随机序列不变）。线程数由 `GEATPY_NUM_THREADS` 或 `ea.set_num_threads()`
+  控制，截到逻辑 CPU 数；fork 由 `os.register_at_fork` 处理（子进程丢弃继承的线程池）。
 
 ## 验证
 
@@ -81,7 +82,7 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 | Rust 内核 | `maturin develop --release` 后 `python -m pytest tests -q`；`cargo fmt --check`；`cargo clippy --all-targets -- -D warnings`；`cargo test --lib` |
 | 有意改变输出 | 在 Docker 中用官方二进制重新生成黄金文件（`scripts/parity/run_original_core.sh`），提交说明写明原因 |
 | 改了算子行为或校验 | 用 `scripts/parity/fuzz/` 对官方二进制做随机差分（见其 README，官方 macOS arm64 轮子可在本机原生运行） |
-| 改了并行路径 | `tests/test_core_perf.py` 比较 1 线程与多线程逐位一致；另用旧版本对同一批输入逐位比较 |
+| 改了并行路径 | `tests/test_core_perf.py` 比较 1 线程与多线程逐位一致（并用 `_geatpy_core._parallel_calls()` 确认用例确实走了并行）；另用旧版本对同一批输入逐位比较；阈值或启发式改动要在阈值附近的规模上比较 1 线程与默认线程数的耗时 |
 | 改了随机算子或性能路径 | 另跑 `scripts/parity/classic.py`（36 个经典用例，两边各 30 次，`cmp` 中 \|z\| > 3 需复查；`rastrigin_multi_SEGA` 因 migrate 缺陷修正而显著更好，属预期；F 列表含 None 的 currentToRand 模板按文档随机 F2，比原版差，也属预期） |
 | 改了参数校验、报错或边界输入 | 合法输入之外的情形（空、反向/非连续、三维、超大尺寸、NaN、错误类型）对照官方二进制补进 `tests/test_core_parity_review4.py` 一类的回归测试：fuzz 只覆盖合法输入 |
 | 仅文档 | 检查内容与引用路径 |

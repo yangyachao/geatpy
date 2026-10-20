@@ -48,6 +48,14 @@ Python 3.8 – 3.15.
 | **Parallelism & speed** | C OpenMP | Non-dominated sorting, reference-point selection, distances and the GD/IGD/Spacing indicators use several threads on large inputs (bit-identical to one thread; set the count with `ea.set_num_threads()` / `GEATPY_NUM_THREADS`), the other operators run on one thread (the `Parallel` argument is accepted for compatibility but has no effect); 0.21 – 1.02× the original's runtime on 36 benchmark cases |
 | **API compatibility** | Reference | **Same Python API, data structures and 42 algorithm templates; core behaviour verified against the official 2.7.0 binaries (see below)** |
 
+> **Threads**: the default is the number of logical CPUs (a larger setting is capped at it). When several geatpy
+> processes run at once (batch jobs, `multiprocessing`, `ProcessPoolExecutor`, joblib), set `GEATPY_NUM_THREADS=1` or
+> call `ea.set_num_threads(1)` in each of them (or give each process cores / processes threads); otherwise the threads
+> compete for the cores and run slower. Every worker thread reserves about 66 MB of virtual address space, so under
+> `ulimit -v` use one thread or set `MALLOC_ARENA_MAX=1`. "Bit-identical to one thread" assumes the default
+> floating-point environment: if another library turns on flush-to-zero (e.g. `torch.set_flush_denormal(True)`),
+> input with subnormal numbers may give different results on several threads.
+
 ---
 
 ## ✅ Parity with the Official 2.7.0 Core
