@@ -646,47 +646,51 @@ pub fn mutde<'py>(
     let (f1, f2) = (fa_opt.unwrap_or(-1.0), fb_opt.unwrap_or(-1.0));
 
     let mut rng = crate::utils::rng();
-    // Trial values of row i on `cols`, with freshly drawn donors and F (the target row is excluded
-    // from the donors when one offspring is produced per individual).
-    let trial = |i: usize, cols: &[usize], rng: &mut rand::rngs::SmallRng| -> Vec<f64> {
+    // Rows as slices (the converted matrices are row-major).
+    let flat = chrom.as_slice().expect("converted arrays are row-major");
+    let row_of = |k: usize| &flat[k * d..(k + 1) * d];
+    let k_vec = 1 + 2 * pairs;
+    // Trial values of row i on `cols` into `out`, with freshly drawn donors and F (the target row
+    // is excluded from the donors when one offspring is produced per individual).
+    let trial = |i: usize, cols: &[usize], rng: &mut rand::rngs::SmallRng, out: &mut [f64]| {
         let mut skip = (rows == n).then_some(i);
-        let mut taken = Vec::with_capacity(1 + 2 * pairs);
-        let vecs: Vec<Vec<f64>> = xrs
-            .iter()
-            .take(1 + 2 * pairs)
-            .map(|x| match x {
-                Xr::Random => chrom.row(draw(&mut taken, &mut skip, n, rng)).to_vec(),
-                Xr::Index(idx) => chrom.row(idx[i]).to_vec(),
-                Xr::Vector(v) => v.row(i).to_vec(),
-            })
-            .collect();
+        let mut taken = Vec::with_capacity(k_vec);
+        let mut vecs: [&[f64]; 5] = [&[]; 5];
+        for (slot, x) in vecs.iter_mut().zip(xrs.iter().take(k_vec)) {
+            *slot = match x {
+                Xr::Random => row_of(draw(&mut taken, &mut skip, n, rng)),
+                Xr::Index(idx) => row_of(idx[i]),
+                Xr::Vector(v) => {
+                    let w = v.ncols();
+                    &v.as_slice().expect("converted arrays are row-major")[i * w..(i + 1) * w]
+                }
+            };
+        }
         let fa = if f1 < 0.0 { rng.gen::<f64>() } else { f1 };
         let fb = if f2 < 0.0 { rng.gen::<f64>() } else { f2 };
-        cols.iter()
-            .map(|&j| {
-                let x = if b.span[j] > 1e-15 {
-                    let mut v = vecs[0][j] + fa * (vecs[1][j] - vecs[2][j]);
-                    if pairs == 2 {
-                        v += fb * (vecs[3][j] - vecs[4][j]);
-                    }
-                    fix_value(v, b.lb[j], b.ub[j], b.span[j], fix, rng)
-                } else {
-                    b.lb[j]
-                };
-                if b.discrete[j] {
-                    x.round()
-                } else {
-                    x
+        for (o, &j) in out.iter_mut().zip(cols) {
+            let x = if b.span[j] > 1e-15 {
+                let mut v = vecs[0][j] + fa * (vecs[1][j] - vecs[2][j]);
+                if pairs == 2 {
+                    v += fb * (vecs[3][j] - vecs[4][j]);
                 }
-            })
-            .collect()
+                fix_value(v, b.lb[j], b.ub[j], b.span[j], fix, rng)
+            } else {
+                b.lb[j]
+            };
+            *o = if b.discrete[j] { x.round() } else { x };
+        }
     };
     if let Some(m) = mask {
         // Mask_N matrix: like geatpy 2.7.0, every selected element gets its own donors and F.
         let vals: Vec<f64> = m
             .indexed_iter()
             .filter(|(_, &on)| on)
-            .map(|((i, j), _)| trial(i, &[j], &mut rng)[0])
+            .map(|((i, j), _)| {
+                let mut v = [0.0];
+                trial(i, &[j], &mut rng, &mut v);
+                v[0]
+            })
             .collect();
         // int32 when every variable is an integer, like the matrix output
         if !b.discrete.is_empty() && b.discrete.iter().all(|&x| x) {
@@ -698,9 +702,16 @@ pub fn mutde<'py>(
     let all_cols: Vec<usize> = (0..d).collect();
     crate::utils::check_alloc(&[rows, d], 8, "float64")?;
     let mut out = Array2::<f64>::zeros((rows, d));
-    for i in 0..rows {
-        let row = trial(i, &all_cols, &mut rng);
-        out.row_mut(i).assign(&Array1::from(row));
+    if d > 0 {
+        let flat_out = out.as_slice_mut().expect("fresh arrays are row-major");
+        for (i, row) in flat_out.chunks_exact_mut(d).enumerate() {
+            trial(i, &all_cols, &mut rng, row);
+        }
+    } else {
+        // no genes: the donors and F are still drawn, as before
+        for i in 0..rows {
+            trial(i, &all_cols, &mut rng, &mut []);
+        }
     }
     crate::utils::ri_out(py, out, &b.discrete)
 }
