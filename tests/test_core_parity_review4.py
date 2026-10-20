@@ -340,12 +340,16 @@ def test_impossible_sizes_raise_numpy_value_error(call):
         call()
 
 
+# Sizes of 8 PiB and more: beyond any process address space (48-bit, or 52-bit on some arm64
+# kernels), so the allocator refuses them on every platform. Smaller ones (tens of TiB) may be
+# reserved under memory overcommit (macOS, Linux with vm.overcommit_memory=1) and the process is
+# killed once the memory is written.
 @rust_only  # the original's messages differ slightly; both raise MemoryError
 @pytest.mark.parametrize('call', [
-    lambda: ea.crtbp(10 ** 13, 3),
-    lambda: ea.crtri(10 ** 13, np.array([[0., 0], [1, 1], [0, 0]])),
-    lambda: ea.urs(5, 10 ** 13),
-    lambda: ea.mutde('RI', np.random.rand(4, 2), np.array([[0., 0], [1, 1], [0, 0]]), None, 0.5, 1, 10 ** 13),
+    lambda: ea.crtbp(2 ** 49, 3),
+    lambda: ea.crtri(2 ** 49, np.array([[0., 0], [1, 1], [0, 0]])),
+    lambda: ea.urs(5, 2 ** 50),
+    lambda: ea.mutde('RI', np.random.rand(4, 2), np.array([[0., 0], [1, 1], [0, 0]]), None, 0.5, 1, 2 ** 49),
 ])
 def test_failed_allocations_raise_memory_error(call):
     with pytest.raises(MemoryError, match='Unable to allocate'):
