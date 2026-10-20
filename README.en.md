@@ -44,8 +44,8 @@ Python 3.8 – 3.15.
 | **Python versions** | Python 3.5 – 3.10 only | **Python 3.8 – 3.15** |
 | **ABI** | One build per Python minor version | **PyO3 `abi3`: a single build for every Python 3.8+** |
 | **Prebuilt wheels** | Windows x86/x64, Linux x86_64, macOS (Apple Silicon only for Python 3.8 – 3.10); no Linux ARM64 | **Linux x86_64/ARM64, macOS Universal2, Windows x64** |
-| **Memory safety** | Edge-case input can segfault and kill the Python process | **Safe Rust only (no `unsafe`); invalid input raises a Python exception** |
-| **Parallelism & speed** | C OpenMP | Non-dominated sorting, reference-point selection, distances and indicators use several threads on large inputs (bit-identical to one thread; set the count with `ea.set_num_threads()` / `GEATPY_NUM_THREADS`), the other operators run on one thread (the `Parallel` argument is accepted for compatibility but has no effect); 0.21 – 1.02× the original's runtime on 36 benchmark cases |
+| **Memory safety** | Edge-case input can segfault and kill the Python process | **Safe Rust (the one `unsafe` call runs the FMA-instruction dot product after checking that the CPU has FMA); empty, reversed, oversized and other edge-case input raises a Python exception instead of crashing** |
+| **Parallelism & speed** | C OpenMP | Non-dominated sorting, reference-point selection, distances and the GD/IGD/Spacing indicators use several threads on large inputs (bit-identical to one thread; set the count with `ea.set_num_threads()` / `GEATPY_NUM_THREADS`), the other operators run on one thread (the `Parallel` argument is accepted for compatibility but has no effect); 0.21 – 1.02× the original's runtime on 36 benchmark cases |
 | **API compatibility** | Reference | **Same Python API, data structures and 42 algorithm templates; core behaviour verified against the official 2.7.0 binaries (see below)** |
 
 ---
@@ -77,7 +77,11 @@ black-box differential testing:
   compare the distribution of the best objective or of IGD/HV. No significant difference except for the
   multi-population `soea_multi_SEGA_templet`: its migration uses `Replacement=2`, where the original evicts the *best*
   individual; this project evicts the worst one as documented and finds clearly better solutions (with migration
-  disabled both cores agree).
+  disabled both cores agree);
+- **Edge-case review** (`tests/test_core_parity_review4.py`): empty populations, empty reference sets, reversed or 3-D
+  arrays, oversized shapes, NaN, wrong argument types and keywords are checked against the official binaries, with the
+  same exception types and messages; where the original crashes or reads out of bounds, this project raises a Python
+  exception.
 
 The core follows the official documentation, the docstrings and the differential test results above. Where the
 official binaries contradict their own documentation, this project follows the documentation and the tests note it:
@@ -86,8 +90,19 @@ official binaries contradict their own documentation, this project follows the d
 `mutgau`/`mutuni` with `Middle=True` centre on `(ub-lb)/2` instead of the interval midpoint, `crtip` produces
 out-of-range integers for fractional bounds, `migrate` with `Replacement=1` always evicts the last individual and the
 fully connected structure (`Structure=0`) migrates from a population to itself, `pbi` returns NaN for an individual
-exactly at the ideal point, `cdist` reads non-contiguous arrays (such as `A[::-1]`) incorrectly, and `refselect` misses a singular extreme-point matrix (e.g. a repeated extreme point) through roundoff and solves it into meaningless intercepts (this project falls back to the column maxima). The official binaries also segfault on length-1 chromosomes or 1-D input
-(`xovsp`/`xovsh`, ...); the Rust core handles them.
+exactly at the ideal point, `cdist` reads non-contiguous arrays (such as `A[::-1]`) incorrectly, `refselect` misses a singular extreme-point matrix (e.g. a repeated extreme point) through roundoff and solves it into meaningless intercepts (this project falls back to the column maxima),
+`crtri` produces out-of-range integers for fractional bounds like `crtip`, `mutde` replaces a None in an F list with the
+other factor (the documentation says None means random), `mutde` with an N-row `Mask_N` matrix does not exclude the
+individual itself from the donors, `refgselect` does not check the rows of CV and modifies the caller's CV in place, and
+`refselect`/`refgselect` still select individuals when there is no reference point. The official binaries also segfault
+on length-1 chromosomes or 1-D input (`xovsp`/`xovsh`, ...), crash when `mutde` draws donors from an empty population,
+and read out of bounds for a short `refgselect` Gamma or empty GD/IGD/HV input; the Rust core handles these or raises a
+Python exception.
+
+> **Note**: `soea_DE_currentToRand_1_templet` passes `F=[0.5, None]`. The original actually fixes F2 at 0.5; this project
+> draws it at random as documented, so the template converges more slowly than 2.7.0 on Rastrigin and similar problems
+> (30 variables, 50×1000: median best about 93 → 156). For the original behaviour set `algorithm.mutOper.F = [0.5, 0.5]`
+> before running it.
 
 ---
 

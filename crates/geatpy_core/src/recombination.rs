@@ -630,6 +630,7 @@ where
     let mut rng = crate::utils::rng();
     let out = match pairing(half_n, n, name)? {
         Pairing::Global(k) => {
+            crate::utils::check_alloc(&[k, l], 8, "float64")?;
             let mut out = Array2::<f64>::zeros((k, l));
             for r in 0..k {
                 for j in 0..l {

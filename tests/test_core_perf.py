@@ -49,10 +49,10 @@ def test_mutde_donors_are_distinct_uniform_and_exclude_the_target():
     assert np.all(np.abs(off - expected) < 6 * np.sqrt(expected))
 
 
-def test_mutde_falls_back_to_any_row_when_donors_run_out():
+def test_mutde_refills_the_donor_pool_when_donors_run_out():
     np.random.seed(2)
-    # 3 rows, 4 random donors (two pairs): only 2 candidates besides the target, so the last
-    # draws may be any row (including the target), which must not hang or fail
+    # 3 rows, 4 random donors (two pairs): only 2 candidates besides the target, so the pool is
+    # refilled with every row (the target included, as in geatpy 2.7.0), which must not hang or fail
     out = _donors(3, 200, pairs=2)
     assert out.shape == (600,)
     assert np.all(np.isfinite(out))

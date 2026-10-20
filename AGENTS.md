@@ -27,10 +27,31 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 
 - 原版自身缺陷、Rust 按文档实现：`ndsortDED` 分层错误、`mergecv` 跨行累加、`tcheby`/`pbi` 在 `idealPoint=None`
   时返回理想点、`refselect` 候选矩阵行序错位及无需选择时返回 arange、`migrate` 的 `Replacement=2` 淘汰最优个体、
-  `mutgau`/`mutuni` 的 `Middle=True` 以 `(ub-lb)/2` 为中心、`crtip` 边界为小数时越界。
+  `mutgau`/`mutuni` 的 `Middle=True` 以 `(ub-lb)/2` 为中心、`crtip`/`crtri`（含 `crtpc('RI')` 与手工 FieldDR 的
+  `initChrom`）整数列边界为小数时越界（区间内没有整数时 Rust 取 ceil(lb)）。
+- `mutde` 的 F 列表中的 None：原版取另一个因子（`[0.5, None]` 等于 `[0.5, 0.5]`），`[None, None]` 还报“F 必须大于 0”，
+  与文档示例“F2 在变异过程中随机生成”和 currentToRand 模板的注释矛盾；Rust 按文档为每个个体随机生成。因此
+  `soea_DE_currentToRand_1_templet` 在 Rastrigin 上比 2.7.0 收敛慢（50×200 中位最优值约 +6，30 维 50×1000 约 93 → 156），
+  属预期。`Mask_N` 为恰好 N 行的矩阵时，原版不把个体自身排除在供体之外（与“r0 不等于 i”矛盾），Rust 与整数
+  `Mask_N=N` 一样排除。
 - 原版缺陷（第三轮差分确认）：`migrate` 的 `Replacement=1` 总淘汰最后一个个体、`Structure=0` 迁入来源含自身；
   `pbi` 个体在理想点时为 NaN；`cdist` 对非连续数组读错；长度为 1 或一维输入时段错误；
   HV 内部 float32；`sus` 二进制要求至少 3 个参数。
+- 原版缺陷（2026-10-20 审查确认），Rust 报干净的异常或给出合理结果，不照搬：
+  - 越界读或读未初始化内存：`mutde` 二维 Xr 行数不足或列数不符、Mask_N 列数不符（Rust 报 RuntimeError）；
+    `refgselect` 的 Gamma 短于参考点数（ValueError）、CV 行数少于 ObjV（RuntimeError，多于 ObjV 时原版只用前 n 行，
+    Rust 同样报错，文本为原版 ndsort* 的 “CV and ObjV disagree”）；GD 的 PF 为空、IGD 的 ObjV 为空（Rust 为 inf）；
+    HV 的 PF 为空（Rust 为 0.0）；三维 ObjV/参考点在 cdist、ndsortESS/DED、GD/IGD/Spacing、mergecv 中被当作二维
+    读取（Rust 报 ValueError 'Buffer has wrong number of dimensions'）。
+  - 崩溃：`mutde` 空种群且需随机抽供体时除零（Rust 报 RuntimeError）；`refselect` 的 levels 为标量时可能段错误；
+    分配失败或尺寸溢出时 Rust 与原版一样报 MemoryError / ValueError（Rust 在按用户输入定尺寸的分配前先检查）。
+  - `refselect`/`refgselect` 的参考点集为空时原版给出任意选择，Rust 报 ValueError。
+  - `refgselect` 就地把调用者 CV 的负值置 0（RVEA 系模板返回种群的 CV 因此没有负值），Rust 不修改输入；ObjV 为空且
+    不传 CV 时原版报 numpy 的 TypeError，Rust 返回空选择和 Gamma。
+  - GD/IGD 的 `Parallel=True` 有数据竞争，偶尔返回错误的值；Rust 始终是串行结果。整数或 float32 输入在原版 GD/IGD/
+    Spacing 中得到垃圾值，Rust 转为 float64。
+  - NaN：GD/IGD 跳过含 NaN 的候选点（原版只有 NaN 恰在一行末尾时才得到 NaN），被平均的点到所有候选的距离都是 NaN
+    时结果为 NaN；HV 排除含 NaN 的点（原版是否得到 NaN 取决于位置和 M），PF 某列全是 NaN 时为 NaN。
 - `refselect` 极点矩阵奇异（多为同一个体同时是几个目标的极点）时，原版 numpy LU 因舍入得到 det≈1e-19≠0，
   解出无意义（甚至为负）的截距；Rust 用除法消元得到精确零主元，退回列最大值（随机 3 目标用例约 1.5%，
   8–12 目标更常见）。其余步骤按原版 arm64 轮子的舍入实现：LU 主元按 OpenBLAS `idamax`（含 NaN 时的行为）、
@@ -40,7 +61,12 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
   NaN 保留并按 arm64 原版视为不可行（x86 反编译的 `1e-12 < CV` 写法看不出这一点）。
 - `rws` 先把 FitnV 平移到非负；`crowdis` 接受 `levels=None`；HV 在 M=4 时用精确算法（原版蒙特卡洛）。
 - 有意更宽松（原版报错）：`maxormins` 接受 list；'P' 编码的 mutinv/mutmove/mutswap 不强制 FieldDR；一维输入；
-  整数参数（Half_N、Nind 等）接受 numpy 整数（原版只认 Python int）。
+  整数参数（Half_N、Nind、Mask_N 等）接受 numpy 整数（原版只认 Python int）；一维参数（refselect 的 levels、
+  refgselect 的 Gamma 等）接受 list、整数数组和 n×1/1×n 数组；`mutde` 的 F 接受 tuple 和长度不为 2 的列表
+  （单元素当标量，空列表当 None；原版报错或段错误）；经 `geatpy.core` 包装层调用时关键字参数不区分大小写和下划线
+  （如 `neednum=`）。
+- 有意更严格或不同：`refselect` 的 NUM 为负时报 OverflowError（原版按 0 处理）；`ndsort*` 的 needNum/needLevel 超出
+  C int 范围（含 inf）时按全部分级处理（原版 ESS/TNS 报 OverflowError）。
 - GeneID 与原版一样截断为 int32；NaN 按 arm64 上 numpy 的转换取 0（x86_64 原版得到 INT_MIN，排序位置不同）。
 - 整数输出一律 int32（与原版一致）；例外是原版用 numpy 实现的 `crtbp`、`urs`、`ecs`、Nsel = N 的 `otos`（int64），
   以及长度 < 2 的排列染色体原样返回。
@@ -52,11 +78,12 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
 
 | 改动范围 | 验证要求 |
 | --- | --- |
-| Rust 内核 | `maturin develop --release` 后 `python -m pytest tests -q`；`cargo fmt --check`；`cargo clippy -- -D warnings` |
+| Rust 内核 | `maturin develop --release` 后 `python -m pytest tests -q`；`cargo fmt --check`；`cargo clippy --all-targets -- -D warnings`；`cargo test --lib` |
 | 有意改变输出 | 在 Docker 中用官方二进制重新生成黄金文件（`scripts/parity/run_original_core.sh`），提交说明写明原因 |
 | 改了算子行为或校验 | 用 `scripts/parity/fuzz/` 对官方二进制做随机差分（见其 README，官方 macOS arm64 轮子可在本机原生运行） |
 | 改了并行路径 | `tests/test_core_perf.py` 比较 1 线程与多线程逐位一致；另用旧版本对同一批输入逐位比较 |
-| 改了随机算子或性能路径 | 另跑 `scripts/parity/classic.py`（36 个经典用例，两边各 30 次，`cmp` 中 \|z\| > 3 需复查；`rastrigin_multi_SEGA` 因 migrate 缺陷修正而显著更好，属预期） |
+| 改了随机算子或性能路径 | 另跑 `scripts/parity/classic.py`（36 个经典用例，两边各 30 次，`cmp` 中 \|z\| > 3 需复查；`rastrigin_multi_SEGA` 因 migrate 缺陷修正而显著更好，属预期；F 列表含 None 的 currentToRand 模板按文档随机 F2，比原版差，也属预期） |
+| 改了参数校验、报错或边界输入 | 合法输入之外的情形（空、反向/非连续、三维、超大尺寸、NaN、错误类型）对照官方二进制补进 `tests/test_core_parity_review4.py` 一类的回归测试：fuzz 只覆盖合法输入 |
 | 仅文档 | 检查内容与引用路径 |
 
 - 浮点排序用全序比较（`crate::utils::cmp_nan_last`，即 numpy 的 NaN 置后顺序），不要用 `partial_cmp(..).unwrap()` 或

@@ -11,7 +11,9 @@ type Opt<'a, 'py> = Option<&'a Bound<'py, PyAny>>;
 fn fitness_or_n(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
     if !obj.hasattr("__len__")? {
         if let Ok(n) = obj.extract::<f64>() {
-            return Ok(vec![1.0; n.max(0.0) as usize]);
+            let n = n.max(0.0) as usize;
+            crate::utils::check_alloc(&[n], 8, "float64")?;
+            return Ok(vec![1.0; n]);
         }
     }
     let a = crate::utils::to_f64_array2(obj)?;
@@ -20,17 +22,20 @@ fn fitness_or_n(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
 
 /// Number of individuals to select: None => n, (0, 1) => ceil(n * x), otherwise ceil(x).
 fn sel_count(nsel: Opt, n: usize) -> PyResult<usize> {
-    match nsel {
+    let count = match nsel {
         Some(o) if !o.is_none() => {
             let x: f64 = o.extract()?;
-            Ok(if x > 0.0 && x < 1.0 {
+            if x > 0.0 && x < 1.0 {
                 (n as f64 * x).ceil() as usize
             } else {
                 x.ceil().max(0.0) as usize
-            })
+            }
         }
-        _ => Ok(n),
-    }
+        _ => n,
+    };
+    // the indices are collected as 8-byte integers before the int32 output
+    crate::utils::check_alloc(&[count], 8, "int64")?;
+    Ok(count)
 }
 
 /// Selected indices as int32, like geatpy 2.7.0 (its C kernels fill np.int32 buffers).
@@ -220,6 +225,7 @@ fn ecs_idx(fit: &[f64], nsel: usize) -> Vec<usize> {
 }
 
 fn select_by_name(name: &str, fit: &[f64], nsel: usize, tour: usize) -> PyResult<Vec<usize>> {
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(match name {
         "dup" => dup_idx(fit, nsel),
         "ecs" => ecs_idx(fit, nsel),
@@ -251,6 +257,7 @@ pub fn dup<'py>(
     params3: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params2, params3);
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(idx_out(py, dup_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
 
@@ -265,6 +272,7 @@ pub fn ecs<'py>(
     params3: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let _ = (params2, params3);
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(idx_out64(py, ecs_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
 
@@ -279,6 +287,7 @@ pub fn tour<'py>(
     parallel: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = parallel;
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(idx_out(
         py,
         tour_idx(&fitness_or_n(fitn_v_n)?, nsel, tour.unwrap_or(2), false),
@@ -296,6 +305,7 @@ pub fn etour<'py>(
     parallel: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = parallel;
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(idx_out(
         py,
         tour_idx(&fitness_or_n(fitn_v_n)?, nsel, tour.unwrap_or(2), true),
@@ -313,6 +323,7 @@ pub fn rws<'py>(
     parallel: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params2, parallel);
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(idx_out(py, rws_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
 
@@ -327,6 +338,7 @@ pub fn sus<'py>(
     parallel: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i32>>> {
     let _ = (params2, parallel);
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(idx_out(py, sus_idx(&fitness_or_n(fitn_v_n)?, nsel)))
 }
 
@@ -341,6 +353,7 @@ pub fn urs<'py>(
     params3: Opt<'_, 'py>,
 ) -> PyResult<Bound<'py, PyArray1<i64>>> {
     let _ = (params2, params3);
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     Ok(idx_out64(py, urs_idx(fitness_or_n(fitn_v_n)?.len(), nsel)))
 }
 
@@ -393,6 +406,7 @@ pub fn otos<'py>(
     parallel: Opt<'_, 'py>,
 ) -> PyResult<PyObject> {
     let _ = (params2, parallel);
+    crate::utils::check_alloc(&[nsel], 8, "int64")?;
     let fit = fitness_or_n(fitn_v_n)?;
     let idx = otos_idx(&fit, nsel)?;
     Ok(if wide_output("otos", fit.len(), nsel) {
@@ -505,7 +519,12 @@ fn prepared_column(
             shape_error.to_string(),
         ));
     }
-    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
+    // the operator name, as in "error in ranking: ..."
+    let name = shape_error
+        .strip_prefix("error in ")
+        .and_then(|r| r.split(':').next())
+        .unwrap_or("");
+    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins, name)?;
     Ok(obj.column(0).to_vec())
 }
 
@@ -522,7 +541,9 @@ fn column(v: Vec<f64>) -> Array2<f64> {
 fn nonlinear_root(sp: f64, n: usize) -> f64 {
     let f = |x: f64| {
         (sp - n as f64) * x.powi(n as i32 - 1)
-            + (0..n - 1).map(|i| sp * x.powi(i as i32)).sum::<f64>()
+            + (0..n - 1)
+                .map(|i| sp * x.powi(i as i32))
+                .fold(0.0, |s, x| s + x)
     };
     let (mut lo, mut hi) = (1.0, 2.0);
     while f(hi) > 0.0 && hi < 1e6 {
@@ -590,7 +611,7 @@ pub fn ranking<'py>(
     } else if rm.unwrap_or(0) == 1 {
         let sp = sp.unwrap_or(2.0);
         let x = nonlinear_root(sp, n);
-        let denom: f64 = (0..n).map(|i| x.powi(i as i32)).sum();
+        let denom: f64 = (0..n).map(|i| x.powi(i as i32)).fold(0.0, |s, x| s + x);
         pos.iter()
             .map(|&p| n as f64 * x.powi(p as i32) / denom)
             .collect()
@@ -631,7 +652,7 @@ pub fn scaling<'py>(
     if n == 0 || g.iter().all(|&x| x == g[0]) {
         return Ok(column(vec![1.0; n]).into_pyarray(py));
     }
-    let avg = g.iter().sum::<f64>() / n as f64;
+    let avg = g.iter().fold(0.0, |s, x| s + x) / n as f64;
     let gmin = g.iter().cloned().fold(f64::INFINITY, f64::min);
     let gmax = g.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let (a, b) = if gmin < (avg * smul - gmax) / (smul - 1.0) {

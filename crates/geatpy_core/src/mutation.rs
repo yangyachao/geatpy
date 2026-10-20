@@ -71,16 +71,14 @@ pub fn mutpolyn<'py>(
 ) -> PyResult<PyObject> {
     let _ = (parallel, params7);
     require_ri(encoding, "mutpolyn")?;
-    // A 1-D OldChrom is a single chromosome (the original has a dedicated 1-D path).
+    // A 1-D OldChrom is a single chromosome (the original segfaults on it).
     let one_d = old_chrom
         .getattr("ndim")
         .and_then(|v| v.extract::<usize>())
         .map(|nd| nd == 1)
         .unwrap_or(false);
     let mut chrom = if one_d {
-        let v = crate::utils::to_f64_array1(old_chrom)?;
-        let l = v.len();
-        v.into_shape_with_order((1, l)).unwrap()
+        crate::utils::to_f64_array1(old_chrom)?.insert_axis(numpy::ndarray::Axis(0))
     } else {
         crate::utils::to_f64_array2(old_chrom)?
     };
@@ -285,7 +283,7 @@ pub fn mutbga<'py>(
                     let mut delta: f64 = (0..g)
                         .filter(|_| rng.gen::<f64>() < p)
                         .map(|k| 0.5f64.powi(k as i32))
-                        .sum();
+                        .fold(0.0, |s, x| s + x);
                     delta = delta.max(0.5f64.powi((g - 1) as i32));
                     if rng.gen::<f64>() < 0.5 {
                         delta = -delta;
@@ -440,18 +438,19 @@ fn flip_positions(total: usize, d: usize, pm: &[f64]) -> Vec<usize> {
     hits
 }
 
-/// Draws a donor index from 0..n uniformly without replacement (`taken` holds the earlier draws),
-/// never `skip`; once every candidate is taken, any index is returned. Rejection sampling keeps
-/// each draw O(1) (a candidate pool of length n per individual made mutde O(n^2)) with the same
-/// distribution as drawing from that pool.
-fn draw<R: Rng>(taken: &mut Vec<usize>, skip: Option<usize>, n: usize, rng: &mut R) -> usize {
-    let candidates = n - usize::from(skip.is_some());
-    if taken.len() >= candidates {
-        return rng.gen_range(0..n);
+/// Draws a donor index from 0..n uniformly without replacement (`taken` holds the draws since the
+/// pool was last filled; `skip`, the target row, is excluded until then). Like geatpy 2.7.0, once
+/// every candidate is taken the pool is refilled with every row, the target included, and drawing
+/// goes on without replacement. Rejection sampling keeps each draw O(1) (a candidate pool of length
+/// n per individual made mutde O(n^2)) with the same distribution as drawing from that pool. `n` > 0.
+fn draw<R: Rng>(taken: &mut Vec<usize>, skip: &mut Option<usize>, n: usize, rng: &mut R) -> usize {
+    if taken.len() + usize::from(skip.is_some()) >= n {
+        taken.clear();
+        *skip = None;
     }
     loop {
         let k = rng.gen_range(0..n);
-        if Some(k) != skip && !taken.contains(&k) {
+        if Some(k) != *skip && !taken.contains(&k) {
             taken.push(k);
             return k;
         }
@@ -489,67 +488,125 @@ pub fn mutde<'py>(
     // Output rows, and an optional element mask.
     let mut rows = n;
     let mut mask: Option<Array2<bool>> = None;
-    if let Some(m) = mask_n {
-        if !m.is_none() {
-            if let Ok(k) = m.extract::<usize>() {
-                rows = k;
-            } else {
-                let arr = crate::utils::to_f64_array2(m)?;
-                if arr.shape()[1] != d {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "error in mutde: The number of columns of Mask_N must equal that of OldChrom.",
-                    ));
-                }
-                rows = arr.shape()[0];
-                mask = Some(arr.mapv(|x| x != 0.0));
+    if let Some(m) = mask_n.filter(|m| !m.is_none()) {
+        if m.is_instance_of::<pyo3::types::PyBool>() && m.extract::<bool>()? {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "an integer is required",
+            ));
+        }
+        if let Ok(arr) = m.downcast::<numpy::PyUntypedArray>() {
+            use numpy::{PyArrayDescrMethods, PyUntypedArrayMethods};
+            if arr.ndim() != 2 {
+                return Err(err("error in mutde: The dimension of Mask_N must be 2 when it is a Numpy ndarray. (当传入参数Mask_N是Numpy ndarray类型时，它必须是2维的。)".to_string()));
             }
+            if !arr.dtype().is_equiv_to(&numpy::dtype::<bool>(py)) {
+                return Err(err("error in mutde: The element of Mask_N must be True or False when Mask_N is a Numpy ndarray. (当传入参数Mask_N是Numpy ndarray类型时，它的元素必须是True或False。)".to_string()));
+            }
+            let arr = crate::utils::to_f64_array2(m)?;
+            if arr.shape()[1] != d {
+                return Err(err(
+                    "error in mutde: The number of columns of Mask_N must equal that of OldChrom."
+                        .to_string(),
+                ));
+            }
+            rows = arr.shape()[0];
+            mask = Some(arr.mapv(|x| x != 0.0));
+        } else if let Ok(k) = m.extract::<i64>() {
+            if k <= 0 {
+                return Err(err("error in mutde: Mask_N must be bigger than 0 when it is a integer. (当传入参数Mask_N是int类型时，它必须是正整数。)".to_string()));
+            }
+            rows = k as usize;
+        } else {
+            return Err(err(
+                "error in mutde: Mask_N type error. (传入参数Mask_N的类型错误，详见API文档。)"
+                    .to_string(),
+            ));
         }
     }
 
+    // XrList: a list of at most 5 entries, each None, a 2-D vector matrix Xr or a 1-D index array r
+    // (geatpy 2.7.0's checks and messages; its out-of-range reads on short Xr are refused instead).
+    const ROLE: [&str; 5] = ["基向量", "差分量", "差分量", "差分量", "差分量"];
+    const SEQ: [&str; 5] = ["基向量", "差分向量", "差分向量", "差分向量", "差分向量"];
     let mut xrs: Vec<Xr> = Vec::new();
-    if let Some(list) = xr_list {
-        if !list.is_none() {
-            for item in list.try_iter()? {
-                let item = item?;
-                if item.is_none() {
-                    xrs.push(Xr::Random);
-                    continue;
-                }
-                let ndim: usize = item.getattr("ndim").and_then(|v| v.extract()).unwrap_or(1);
-                if ndim >= 2 {
-                    let v = crate::utils::to_f64_array2(&item)?;
-                    if v.shape()[0] < rows || v.shape()[1] != d {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                            "error in mutde: The shape of a vector in XrList does not match.",
-                        ));
-                    }
-                    xrs.push(Xr::Vector(v));
-                } else {
-                    let v = crate::utils::to_f64_array1(&item)?;
-                    let idx: Vec<usize> = v
-                        .iter()
-                        .map(|&x| x as i64)
-                        .map(|x| {
-                            if x < 0 || x as usize >= n {
-                                usize::MAX
-                            } else {
-                                x as usize
-                            }
-                        })
-                        .collect();
-                    if idx.len() < rows || idx.iter().take(rows).any(|&x| x == usize::MAX) {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                            "error in mutde: The index in XrList is out of range. (XrList中的索引越界。)",
-                        ));
-                    }
-                    xrs.push(Xr::Index(idx));
-                }
+    if let Some(list) = xr_list.filter(|l| !l.is_none()) {
+        let list = list.downcast::<pyo3::types::PyList>().map_err(|_| {
+            err("error in mutde: XrList must be a list. (XrList必须是list类型。)".to_string())
+        })?;
+        if list.len() > 5 {
+            return Err(err("error in mutde: The length of XrList must not be over than 5. (输入参数XrList所包含的元素个数必须不超过5个)".to_string()));
+        }
+        for (k, item) in list.iter().enumerate() {
+            if item.is_none() {
+                xrs.push(Xr::Random);
+                continue;
             }
+            let ndim = item
+                .downcast::<numpy::PyUntypedArray>()
+                .map(|a| {
+                    use numpy::PyUntypedArrayMethods;
+                    a.ndim()
+                })
+                .unwrap_or(0);
+            if ndim != 1 && ndim != 2 {
+                return Err(err(format!("error in mutde: Data error of the parameter r{k}(or Xr{k}). ({}索引r{k}或{}矩阵Xr{k}的数据格式不正确，详见help(mutde)帮助文档。)", ROLE[k], if k == 0 { "基向量" } else { "差分向量" })));
+            }
+            if ndim == 2 {
+                let v = crate::utils::to_f64_array2(&item)?;
+                if v.shape()[0] < rows || v.shape()[1] != d {
+                    return Err(err(
+                        "error in mutde: The shape of a vector in XrList does not match."
+                            .to_string(),
+                    ));
+                }
+                xrs.push(Xr::Vector(v));
+                continue;
+            }
+            let v = crate::utils::to_f64_array1(&item)?;
+            if v.len() != rows {
+                return Err(err(if k == 1 {
+                    "error in mutde: r1 and OldChrom disagree. (差分向量索引序列r1的长度必须和种群规模相等。)".to_string()
+                } else {
+                    format!("error in mutde: The length of r{k} must be equal to others. (向量索引序列长度不一致，如果Mask_N为int，则传入的索引序列长度必须等于Mask_N。)")
+                }));
+            }
+            let idx: Vec<usize> = v
+                .iter()
+                .map(|&x| x as i64)
+                .map(|x| {
+                    if x < 0 || x as usize >= n {
+                        usize::MAX
+                    } else {
+                        x as usize
+                    }
+                })
+                .collect();
+            if idx.contains(&usize::MAX) {
+                // the original has no message of its own for r1 and reuses the length one
+                return Err(err(if k == 1 {
+                    "error in mutde: The length of r1 must be equal to others. (向量索引序列长度不一致，如果Mask_N为int，则传入的索引序列长度必须等于Mask_N。)".to_string()
+                } else {
+                    format!("error in mutde: Some elements of r{k} is illegal. ({}索引序列r{k}的某些元素不合法。)", SEQ[k])
+                }));
+            }
+            xrs.push(Xr::Index(idx));
         }
     }
     let pairs = if xrs.len() > 3 { 2 } else { 1 };
     while xrs.len() < 1 + 2 * pairs {
         xrs.push(Xr::Random);
+    }
+    // geatpy 2.7.0 crashes (division by zero) when it has to draw donors from no individuals.
+    let draws = xrs
+        .iter()
+        .take(1 + 2 * pairs)
+        .any(|x| matches!(x, Xr::Random));
+    let produces = mask.as_ref().map_or(rows > 0, |m| m.iter().any(|&on| on));
+    if n == 0 && draws && produces {
+        return Err(err(
+            "error in mutde: OldChrom must not be empty when donors are drawn at random."
+                .to_string(),
+        ));
     }
 
     // F: scalar, [F1, F2] with None meaning "random in (0, 1) per individual", or None.
@@ -592,13 +649,13 @@ pub fn mutde<'py>(
     // Trial values of row i on `cols`, with freshly drawn donors and F (the target row is excluded
     // from the donors when one offspring is produced per individual).
     let trial = |i: usize, cols: &[usize], rng: &mut rand::rngs::SmallRng| -> Vec<f64> {
-        let skip = (rows == n).then_some(i);
+        let mut skip = (rows == n).then_some(i);
         let mut taken = Vec::with_capacity(1 + 2 * pairs);
         let vecs: Vec<Vec<f64>> = xrs
             .iter()
             .take(1 + 2 * pairs)
             .map(|x| match x {
-                Xr::Random => chrom.row(draw(&mut taken, skip, n, rng)).to_vec(),
+                Xr::Random => chrom.row(draw(&mut taken, &mut skip, n, rng)).to_vec(),
                 Xr::Index(idx) => chrom.row(idx[i]).to_vec(),
                 Xr::Vector(v) => v.row(i).to_vec(),
             })
@@ -639,6 +696,7 @@ pub fn mutde<'py>(
         return Ok(Array1::from(vals).into_pyarray(py).into_any().unbind());
     }
     let all_cols: Vec<usize> = (0..d).collect();
+    crate::utils::check_alloc(&[rows, d], 8, "float64")?;
     let mut out = Array2::<f64>::zeros((rows, d));
     for i in 0..rows {
         let row = trial(i, &all_cols, &mut rng);

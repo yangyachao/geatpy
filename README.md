@@ -38,8 +38,8 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 | **Python 版本支持** | 仅支持 Python 3.5 ~ 3.10 | **Python 3.8 ~ 3.15 全覆盖支持** |
 | **ABI 兼容性** | 每个 Python 小版本单独构建 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
 | **跨平台预编译** | Windows x86/x64、Linux x86_64、macOS（Apple Silicon 仅 Python 3.8 ~ 3.10），无 Linux ARM64 | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
-| **代码与内存安全** | 边界输入可能触发段错误，导致 Python 进程退出 | **纯安全 Rust（无 `unsafe`），非法输入抛出 Python 异常而非段错误** |
-| **多核并行与性能** | C OpenMP 并行 | 非支配排序、参考点选择、距离与指标计算在大规模时自动多线程（结果与单线程逐位一致，`ea.set_num_threads()` / `GEATPY_NUM_THREADS` 设置线程数），其余算子单线程（`Parallel` 参数为兼容保留，不生效）；36 个经典用例耗时为原版的 0.21~1.02 倍 |
+| **代码与内存安全** | 边界输入可能触发段错误，导致 Python 进程退出 | **安全 Rust（唯一的 `unsafe` 是确认 CPU 支持 FMA 后调用 FMA 指令版本的点积）；空、反向、超大等边界输入抛出 Python 异常而非段错误** |
+| **多核并行与性能** | C OpenMP 并行 | 非支配排序、参考点选择、距离与 GD/IGD/Spacing 指标在大规模时自动多线程（结果与单线程逐位一致，`ea.set_num_threads()` / `GEATPY_NUM_THREADS` 设置线程数），其余算子单线程（`Parallel` 参数为兼容保留，不生效）；36 个经典用例耗时为原版的 0.21~1.02 倍 |
 | **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与 42 个算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
 
 ---
@@ -62,7 +62,10 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
 - **经典用例对比**（`scripts/parity/classic.py`）：Ackley、Rosenbrock、Rastrigin、att48 TSP、ZDT、DTLZ、BNH 等
   36 个问题与算法模板组合，覆盖最大化、混合整数、带约束、奇数种群、排列编码、多种群与多染色体（psy）模板，
   两边各运行 30 次比较最优值或 IGD/HV 的分布。除多种群 `soea_multi_SEGA_templet` 外均无显著差异；该模板的
-  迁移用 `Replacement=2`，原版此处淘汰的是最优个体，本项目按文档淘汰最差个体，解明显更好（关闭迁移后两边一致）。
+  迁移用 `Replacement=2`，原版此处淘汰的是最优个体，本项目按文档淘汰最差个体，解明显更好（关闭迁移后两边一致）；
+- **边界输入复核**（`tests/test_core_parity_review4.py`）：空种群、空参考点、反向或三维数组、超大尺寸、NaN、
+  错误的参数类型与关键字等情形逐一对照官方二进制，报错类型与信息与原版一致；原版在其中一些情形下崩溃或越界读取，
+  本项目改为抛出 Python 异常。
 
 内核行为依据官方文档、docstring 与上述差分测试结果实现。
 官方二进制中有几处与其自身文档不符的缺陷，本项目按文档实现，测试中单独说明：
@@ -71,8 +74,15 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
 `mutgau`/`mutuni` 的 `Middle=True` 以 `(ub-lb)/2` 而非区间中点为中心、
 `crtip` 在边界为小数时会生成越界整数、`migrate` 随机替换（`Replacement=1`）总是淘汰最后一个个体且
 完全网状结构（`Structure=0`）会从自身迁入、`pbi` 对恰在理想点上的个体返回 NaN、`cdist` 对非连续数组
-（如 `A[::-1]`）读错数据、`refselect` 在极点矩阵奇异（如重复极点）时因舍入未能识别而解出无意义的截距（本项目退回列最大值）；此外官方二进制在染色体长度为 1 或输入一维时会
-段错误（`xovsp`/`xovsh` 等），Rust 内核正常处理。
+（如 `A[::-1]`）读错数据、`refselect` 在极点矩阵奇异（如重复极点）时因舍入未能识别而解出无意义的截距（本项目退回列最大值）、
+`crtri` 与 `crtip` 一样在边界为小数时生成越界整数、`mutde` 把 F 列表中的 None 当作另一个因子（文档写明 None 表示随机生成）、
+`mutde` 的 `Mask_N` 为 N 行矩阵时不排除个体自身、`refgselect` 不检查 CV 行数且会就地修改传入的 CV、
+`refselect`/`refgselect` 在参考点集为空时仍给出选择；此外官方二进制在染色体长度为 1 或输入一维时会
+段错误（`xovsp`/`xovsh` 等），在空种群上抽取 `mutde` 供体时崩溃，`refgselect` 的 Gamma 过短、GD/IGD/HV 的输入为空时读取越界内存，
+Rust 内核正常处理或抛出 Python 异常。
+
+> **注意**：`soea_DE_currentToRand_1_templet` 传入 `F=[0.5, None]`。原版实际把 F2 固定为 0.5，本项目按文档随机生成，
+> 因此该模板在 Rastrigin 等问题上收敛比 2.7.0 慢（30 维、50×1000 时中位最优值约 93 → 156）。需要原版行为时可在运行前设置 `algorithm.mutOper.F = [0.5, 0.5]`。
 
 ---
 
