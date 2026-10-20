@@ -5,116 +5,127 @@ use pyo3::types::IntoPyDict;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
-fn ndsort_wrapper<'py>(
+/// needNum / needLevel as geatpy 2.7.0 converts them (C ints): None keeps the default (sort every
+/// level), floats are truncated, negative values act as 0, NaN raises ValueError and strings
+/// TypeError. Values beyond the C int range (inf included) sort every level instead of raising
+/// the original's OverflowError.
+fn ndsort_count(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
+    let Some(o) = obj.filter(|o| !o.is_none()) else {
+        return Ok(None);
+    };
+    match crate::utils::c_long(o) {
+        Ok(v) => Ok(usize::try_from(v.clamp(0, i32::MAX as i64)).ok()),
+        Err(e) if e.is_instance_of::<pyo3::exceptions::PyOverflowError>(o.py()) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ndsort_entry<'py>(
     py: Python<'py>,
+    name: &str,
     obj_v: &Bound<'py, PyAny>,
-    args: &Bound<'py, pyo3::types::PyTuple>,
-    kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
+    need_num: Option<&Bound<'py, PyAny>>,
+    need_level: Option<&Bound<'py, PyAny>>,
+    cv: Option<&Bound<'py, PyAny>>,
+    maxormins: Option<&Bound<'py, PyAny>>,
     tree: bool,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
-    let mut need_sort: Option<usize> = None;
-    let mut need_level: Option<usize> = None;
-    let mut cv_any: Option<Bound<'py, PyAny>> = None;
-    let mut maxormins_any: Option<Bound<'py, PyAny>> = None;
-
-    if args.len() > 0 {
-        let item = args.get_item(0)?;
-        if !item.is_none() {
-            need_sort = item.extract().ok();
-        }
-    }
-    if args.len() > 1 {
-        let item = args.get_item(1)?;
-        if !item.is_none() {
-            need_level = item.extract().ok();
-        }
-    }
-    if args.len() > 2 {
-        let item = args.get_item(2)?;
-        if !item.is_none() {
-            cv_any = Some(item);
-        }
-    }
-    if args.len() > 3 {
-        let item = args.get_item(3)?;
-        if !item.is_none() {
-            maxormins_any = Some(item);
-        }
-    }
-
-    if let Some(kw) = kwargs {
-        for (k, v) in kw.iter() {
-            // An explicit None keeps the default, like an omitted argument.
-            if v.is_none() {
-                continue;
-            }
-            let key = k.extract::<String>()?;
-            match key.to_lowercase().as_str() {
-                "needsort" | "need_sort" | "neednum" | "need_num" => need_sort = v.extract().ok(),
-                "needlevel" | "need_level" => need_level = v.extract().ok(),
-                "cv" => cv_any = Some(v),
-                "maxormins" => maxormins_any = Some(v),
-                _ => {}
-            }
-        }
-    }
-
+    let need_num = ndsort_count(need_num)?;
+    let need_level = ndsort_count(need_level)?;
     let obj = crate::utils::to_f64_array2(obj_v)?;
-    let cv = if let Some(c) = cv_any {
-        Some(crate::utils::to_f64_array2(&c)?)
-    } else {
-        None
+    let cv = match cv.filter(|c| !c.is_none()) {
+        Some(c) => Some(crate::utils::to_f64_array2(c)?),
+        None => None,
     };
-
     ndsort_core(
         py,
+        name,
         obj,
         need_level,
-        need_sort,
+        need_num,
         cv,
-        maxormins_any.as_ref(),
+        maxormins.filter(|m| !m.is_none()),
         tree,
     )
 }
 
 /// Efficient Non-dominated Sort (ENS-SS)
 #[pyfunction]
-#[pyo3(signature = (obj_v, *args, **kwargs))]
+#[pyo3(signature = (ObjV, needNum=None, needLevel=None, CV=None, maxormins=None))]
+#[allow(non_snake_case)]
 pub fn ndsortESS<'py>(
     py: Python<'py>,
-    obj_v: &Bound<'py, PyAny>,
-    args: &Bound<'py, pyo3::types::PyTuple>,
-    kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
+    ObjV: &Bound<'py, PyAny>,
+    needNum: Option<&Bound<'py, PyAny>>,
+    needLevel: Option<&Bound<'py, PyAny>>,
+    CV: Option<&Bound<'py, PyAny>>,
+    maxormins: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
-    ndsort_wrapper(py, obj_v, args, kwargs, false)
+    ndsort_entry(
+        py,
+        "ndsortESS",
+        ObjV,
+        needNum,
+        needLevel,
+        CV,
+        maxormins,
+        false,
+    )
 }
 
 /// Tree-based Non-dominated Sort (T-ENS)
 #[pyfunction]
-#[pyo3(signature = (obj_v, *args, **kwargs))]
+#[pyo3(signature = (ObjV, needNum=None, needLevel=None, CV=None, maxormins=None))]
+#[allow(non_snake_case)]
 pub fn ndsortTNS<'py>(
     py: Python<'py>,
-    obj_v: &Bound<'py, PyAny>,
-    args: &Bound<'py, pyo3::types::PyTuple>,
-    kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
+    ObjV: &Bound<'py, PyAny>,
+    needNum: Option<&Bound<'py, PyAny>>,
+    needLevel: Option<&Bound<'py, PyAny>>,
+    CV: Option<&Bound<'py, PyAny>>,
+    maxormins: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
-    ndsort_wrapper(py, obj_v, args, kwargs, true)
+    ndsort_entry(
+        py,
+        "ndsortTNS",
+        ObjV,
+        needNum,
+        needLevel,
+        CV,
+        maxormins,
+        true,
+    )
 }
 
 /// Non-dominated Sort with Deduplication
 #[pyfunction]
-#[pyo3(signature = (obj_v, *args, **kwargs))]
+#[pyo3(signature = (ObjV, needNum=None, needLevel=None, CV=None, maxormins=None))]
+#[allow(non_snake_case)]
 pub fn ndsortDED<'py>(
     py: Python<'py>,
-    obj_v: &Bound<'py, PyAny>,
-    args: &Bound<'py, pyo3::types::PyTuple>,
-    kwargs: Option<&Bound<'py, pyo3::types::PyDict>>,
+    ObjV: &Bound<'py, PyAny>,
+    needNum: Option<&Bound<'py, PyAny>>,
+    needLevel: Option<&Bound<'py, PyAny>>,
+    CV: Option<&Bound<'py, PyAny>>,
+    maxormins: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<(Bound<'py, PyArray1<f64>>, usize)> {
-    ndsort_wrapper(py, obj_v, args, kwargs, false)
+    ndsort_entry(
+        py,
+        "ndsortDED",
+        ObjV,
+        needNum,
+        needLevel,
+        CV,
+        maxormins,
+        false,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ndsort_core<'py>(
     py: Python<'py>,
+    name: &str,
     raw_obj: Array2<f64>,
     need_level: Option<usize>,
     need_num: Option<usize>,
@@ -129,9 +140,7 @@ fn ndsort_core<'py>(
     }
     if let Some(ref c) = cv {
         if c.shape()[0] != n {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "error in ndsort: CV and ObjV disagree in number of rows.",
-            ));
+            return Err(crate::utils::cv_rows_error(name));
         }
     }
 
@@ -167,7 +176,7 @@ fn ndsort_core<'py>(
             })
             .collect();
         for (row, viol) in obj.iter_mut().zip(c.rows()) {
-            let s: f64 = viol.iter().filter(|&&x| x > 0.0).sum();
+            let s: f64 = viol.iter().filter(|&&x| x > 0.0).fold(0.0, |s, x| s + x);
             if s > 0.0 {
                 for (x, mx) in row.iter_mut().zip(&col_max) {
                     *x = mx + s;
@@ -521,24 +530,25 @@ pub fn cdist<'py>(
     let unit = |x: &Array2<f64>| -> Array2<f64> {
         let mut y = x.clone();
         for mut r in y.rows_mut() {
-            let norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let norm = r.iter().map(|v| v * v).fold(0.0, |s, x| s + x).sqrt();
             r.mapv_inplace(|v| v / norm);
         }
         y
     };
+    crate::utils::check_alloc(&[na, nb], 8, "float64")?;
     let mut out = Array2::<f64>::zeros((na, nb));
     match metric {
         "euclidean" => {
             for i in 0..na {
                 for j in 0..nb {
-                    out[[i, j]] = (0..dim).map(|k| (arr_a[[i, k]] - arr_b[[j, k]]).powi(2)).sum::<f64>().sqrt();
+                    out[[i, j]] = (0..dim).map(|k| (arr_a[[i, k]] - arr_b[[j, k]]).powi(2)).fold(0.0, |s, x| s + x).sqrt();
                 }
             }
         }
         "cityblock" => {
             for i in 0..na {
                 for j in 0..nb {
-                    out[[i, j]] = (0..dim).map(|k| (arr_a[[i, k]] - arr_b[[j, k]]).abs()).sum();
+                    out[[i, j]] = (0..dim).map(|k| (arr_a[[i, k]] - arr_b[[j, k]]).abs()).fold(0.0, |s, x| s + x);
                 }
             }
         }
@@ -547,7 +557,7 @@ pub fn cdist<'py>(
             let similarity = metric == "cosine_similarity";
             for i in 0..na {
                 for j in 0..nb {
-                    let dot: f64 = (0..dim).map(|k| ua[[i, k]] * ub[[j, k]]).sum();
+                    let dot: f64 = (0..dim).map(|k| ua[[i, k]] * ub[[j, k]]).fold(0.0, |s, x| s + x);
                     out[[i, j]] = if similarity { dot } else { 1.0 - dot };
                 }
             }
@@ -597,7 +607,7 @@ pub fn mergecv<'py>(
                 None => arr[[i, j]] > 0.0,
             })
             .map(|j| arr[[i, j]])
-            .sum();
+            .fold(0.0, |s, x| s + x);
     }
     let want_count = return_count
         .map(|o| o.is_truthy())
@@ -654,7 +664,7 @@ pub fn tcheby<'py>(
     parallel: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let _ = parallel;
-    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
+    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins, "tcheby")?;
     let w = crate::utils::to_f64_array2(weights)?;
     let rows = decomposition_rows(obj.shape()[0], w.shape()[0])?;
     let z = ideal_or_min(&obj, ideal_point)?;
@@ -685,7 +695,7 @@ pub fn pbi<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let _ = parallel;
     let theta = theta.unwrap_or(5.0);
-    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
+    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins, "pbi")?;
     let w = crate::utils::to_f64_array2(weights)?;
     let rows = decomposition_rows(obj.shape()[0], w.shape()[0])?;
     let z = ideal_or_min(&obj, ideal_point)?;
@@ -693,14 +703,17 @@ pub fn pbi<'py>(
     let mut out = Array2::<f64>::zeros((rows, 1));
     for i in 0..rows {
         let r = if obj.shape()[0] == 1 { 0 } else { i };
-        let norm = (0..m).map(|j| w[[i, j]] * w[[i, j]]).sum::<f64>().sqrt();
+        let norm = (0..m)
+            .map(|j| w[[i, j]] * w[[i, j]])
+            .fold(0.0, |s, x| s + x)
+            .sqrt();
         let d1 = (0..m)
             .map(|j| (obj[[r, j]] - z[j]) * w[[i, j]])
-            .sum::<f64>()
+            .fold(0.0, |s, x| s + x)
             / norm;
         let d2 = (0..m)
             .map(|j| (obj[[r, j]] - z[j] - d1 * w[[i, j]] / norm).powi(2))
-            .sum::<f64>()
+            .fold(0.0, |s, x| s + x)
             .sqrt();
         out[[i, 0]] = d1 + theta * d2;
     }
@@ -721,7 +734,7 @@ pub fn crtidp<'py>(
     old_ideal_point: Option<&Bound<'py, PyAny>>,
     reverse: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
+    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins, "crtidp")?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
     let reverse = reverse.map(|r| r.is_truthy()).transpose()?.unwrap_or(false);
     let rows: Vec<usize> = (0..n).collect();
@@ -754,7 +767,7 @@ pub fn awGA<'py>(
     cv: Option<&Bound<'py, PyAny>>,
     maxormins: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
+    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins, "awGA")?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
     let zp: Vec<f64> = (0..m)
         .map(|j| obj.column(j).iter().cloned().fold(f64::INFINITY, f64::min))
@@ -771,12 +784,14 @@ pub fn awGA<'py>(
         .map(|j| {
             (0..n)
                 .map(|i| (obj[[i, j]] - zp[j]) / (zm[j] - zp[j] + 0.1))
-                .sum()
+                .fold(0.0, |s, x| s + x)
         })
         .collect();
     let mut out = Array2::<f64>::zeros((n, 1));
     for i in 0..n {
-        out[[i, 0]] = (0..m).map(|j| weight[j] * obj[[i, j]]).sum();
+        out[[i, 0]] = (0..m)
+            .map(|j| weight[j] * obj[[i, j]])
+            .fold(0.0, |s, x| s + x);
     }
     Ok(out.into_pyarray(py))
 }
@@ -790,14 +805,16 @@ pub fn rwGA<'py>(
     cv: Option<&Bound<'py, PyAny>>,
     maxormins: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins)?;
+    let obj = crate::utils::prepared_objectives(obj_v, cv, maxormins, "rwGA")?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
     let mut rng = crate::utils::rng();
     let r: Vec<f64> = (0..m).map(|_| rng.gen::<f64>()).collect();
-    let total: f64 = r.iter().sum();
+    let total: f64 = r.iter().fold(0.0, |s, x| s + x);
     let mut out = Array2::<f64>::zeros((n, 1));
     for i in 0..n {
-        out[[i, 0]] = (0..m).map(|j| r[j] / total * obj[[i, j]]).sum();
+        out[[i, 0]] = (0..m)
+            .map(|j| r[j] / total * obj[[i, j]])
+            .fold(0.0, |s, x| s + x);
     }
     Ok(out.into_pyarray(py))
 }
@@ -831,6 +848,11 @@ fn matmul_mismatch(mb: usize, m: usize) -> PyErr {
         "matmul: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature \
          (n?,k),(k,m?)->(n?,m?) (size {mb} is different from {m})"
     ))
+}
+
+/// Raised instead of geatpy 2.7.0's arbitrary selection when there is no reference point.
+fn no_reference_points() -> PyErr {
+    pyo3::exceptions::PyValueError::new_err("refPoint must contain at least one reference point")
 }
 
 /// numpy's float64 `np.sum` along a contiguous axis (pairwise summation with 8 accumulators).
@@ -925,7 +947,7 @@ fn solve_linear(mut a: Array2<f64>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
     }
     let mut x = vec![0.0; m];
     for r in (0..m).rev() {
-        let s: f64 = (r + 1..m).map(|k| a[[r, k]] * x[k]).sum();
+        let s: f64 = (r + 1..m).map(|k| a[[r, k]] * x[k]).fold(0.0, |s, x| s + x);
         x[r] = (rhs[r] - s) / a[[r, r]];
     }
     Some(x)
@@ -941,25 +963,50 @@ pub fn refselect<'py>(
     py: Python<'py>,
     obj_v: &Bound<'py, PyAny>,
     levels: &Bound<'py, PyAny>,
-    cri_level: f64,
-    need_num: usize,
+    cri_level: &Bound<'py, PyAny>,
+    need_num: &Bound<'py, PyAny>,
     ref_point: &Bound<'py, PyAny>,
     maxormins: Option<&Bound<'py, PyAny>>,
     parallel: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyArray1<bool>>> {
     let _ = parallel;
+    // criLevel is a C int in geatpy 2.7.0 (1.5 -> 1, 2**31 -> OverflowError)
+    let cri_level = crate::utils::c_int(cri_level)? as f64;
     let mut obj = crate::utils::to_f64_array2(obj_v)?;
     crate::utils::unify_objectives(&mut obj, maxormins)?;
     let (n, m) = (obj.shape()[0], obj.shape()[1]);
-    if n <= need_num {
+    // NUM is compared as a Python object first (any int or float, 2**64 included), then truncated
+    if n.into_pyobject(py)?.le(need_num)? {
         return Ok(Array1::from_elem(n, true).into_pyarray(py));
     }
+    let need_num = crate::utils::c_long(need_num)?;
+    let need_num = usize::try_from(need_num).map_err(|_| {
+        pyo3::exceptions::PyOverflowError::new_err("can't convert negative int to unsigned")
+    })?;
     let lev = crate::utils::to_f64_array1(levels)?;
+    if !lev.is_empty() && lev.len() != n {
+        return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+            "boolean index did not match indexed array along dimension 0; dimension is {} but \
+             corresponding boolean dimension is {}",
+            n,
+            lev.len()
+        )));
+    }
+    let at = |i: usize| lev.get(i).copied().unwrap_or(f64::NAN);
     let z = crate::utils::to_f64_array2(ref_point)?;
     let nz = z.shape()[0];
-    let idx1: Vec<usize> = (0..n).filter(|&i| lev[i] < cri_level).collect();
-    let idx2: Vec<usize> = (0..n).filter(|&i| lev[i] == cri_level).collect();
+    let idx1: Vec<usize> = (0..n).filter(|&i| at(i) < cri_level).collect();
+    let idx2: Vec<usize> = (0..n).filter(|&i| at(i) == cri_level).collect();
     let (n1, n2) = (idx1.len(), idx2.len());
+    if n1 + n2 < need_num {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "error in refselect: The number of individuals which are in and below the critical \
+             level is less than the required number. (处于临界层及其前面各层的个体总数不能小于所需要选择的个体数目。)",
+        ));
+    }
+    if z.shape()[1] != m {
+        return Err(matmul_mismatch(z.shape()[1], m));
+    }
     let mut flag = Array1::from_elem(n, false);
     for &i in &idx1 {
         flag[i] = true;
@@ -967,6 +1014,9 @@ pub fn refselect<'py>(
     let quota = need_num.saturating_sub(n1);
     if quota == 0 || n2 == 0 {
         return Ok(flag.into_pyarray(py));
+    }
+    if nz == 0 {
+        return Err(no_reference_points());
     }
     // candidates translated by their ideal point
     let rows: Vec<usize> = idx1.iter().chain(idx2.iter()).cloned().collect();
@@ -1034,9 +1084,6 @@ pub fn refselect<'py>(
     // integer objectives) break the same way: rows are normalised first and multiplied with numpy
     // `@` (an FMA chain in OpenBLAS), then each individual goes to the first reference point with
     // the smallest 1 - cos^2, and d = sqrt(|c|^2 (1 - cos^2)) is NaN when roundoff makes it negative.
-    if z.shape()[1] != m {
-        return Err(matmul_mismatch(z.shape()[1], m));
-    }
     let (cu, zu) = (unit_rows(&c), unit_rows(&z));
     let mut pi = vec![0usize; rows.len()];
     let mut d = vec![0.0; rows.len()];
@@ -1120,37 +1167,48 @@ pub fn refgselect<'py>(
     // strictly smaller one, cosines are normalised rows multiplied as numpy `@` (see `matmul_row`).
     for j in 0..m {
         let col = obj.column(j);
+        let Some(&first) = col.first() else { continue };
         let mn = col
             .iter()
             .skip(1)
-            .fold(col[0], |mn, &v| if v < mn { v } else { mn });
+            .fold(first, |mn, &v| if v < mn { v } else { mn });
         obj.column_mut(j).mapv_inplace(|v| v - mn);
     }
     let v = crate::utils::to_f64_array2(ref_point)?;
     let nv = v.shape()[0];
     let vu = unit_rows(&v);
-    // Total violation as the original computes it: negative entries set to 0, then `np.sum(_, 1)`,
-    // so a NaN stays NaN (and counts as infeasible below).
-    let viol: Vec<f64> = match cv {
-        Some(c) if !c.is_none() => {
-            let a = crate::utils::to_f64_array2(c)?;
-            if a.shape()[0] != n {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "error: CV and ObjV disagree in number of rows.",
-                ));
-            }
-            a.rows()
-                .into_iter()
-                .map(|r| {
-                    let r: Vec<f64> = r.iter().map(|&x| if x < 0.0 { 0.0 } else { x }).collect();
-                    numpy_pairwise_sum(&r)
-                })
-                .collect()
-        }
-        _ => vec![0.0; n],
-    };
+    // Same order as geatpy 2.7.0: Gamma (and its warning), then the violations, then the matrix
+    // product that raises numpy's error for reference points of another width.
     let gamma: Vec<f64> = match gamma {
-        Some(g) if !g.is_none() => crate::utils::to_f64_array1(g)?.to_vec(),
+        Some(g) if !g.is_none() => {
+            if !g.is_instance_of::<numpy::PyUntypedArray>()
+                && !g.is_instance_of::<pyo3::types::PyList>()
+                && !g.is_instance_of::<pyo3::types::PyTuple>()
+            {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Cannot convert {} to numpy.ndarray",
+                    g.get_type().name()?
+                )));
+            }
+            if let Ok(a) = g.downcast::<numpy::PyUntypedArray>() {
+                use numpy::PyUntypedArrayMethods;
+                if a.ndim() == 0 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "Buffer has wrong number of dimensions (expected 1, got 0)",
+                    ));
+                }
+            }
+            let g = crate::utils::to_f64_array1(g)?.to_vec();
+            // geatpy 2.7.0 reads past the end of a short Gamma
+            if g.len() < nv {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "error in refgselect: Gamma must have one element per reference point (got {}, expected {}).",
+                    g.len(),
+                    nv
+                )));
+            }
+            g
+        }
         _ => {
             // cosine between reference vectors with the diagonal zeroed; an exact 1 (a repeated
             // vector) is zeroed too, with the original's warning
@@ -1160,11 +1218,12 @@ pub fn refgselect<'py>(
                 row[i] = 0.0;
             }
             if cvv.iter().any(|&x| x == 1.0) {
+                // stack level 2: the caller of the geatpy.core wrapper, like the original's warning
                 PyErr::warn(
                     py,
                     &py.get_type::<pyo3::exceptions::PyRuntimeWarning>(),
                     c"Warning in refgselect: Some reference points are so close to the original point.(部分参考点过于接近坐标原点，此时将受到浮点精度限制的影响。)",
-                    1,
+                    2,
                 )?;
                 cvv.mapv_inplace(|x| if x == 1.0 { 0.0 } else { x });
             }
@@ -1181,8 +1240,36 @@ pub fn refgselect<'py>(
                 .collect()
         }
     };
+    // Total violation as the original computes it: negative entries set to 0, then `np.sum(_, 1)`,
+    // so a NaN stays NaN (and counts as infeasible below). Unlike the original the caller's CV is
+    // left unchanged.
+    let viol: Option<Array2<f64>> = match cv {
+        Some(c) if !c.is_none() => Some(crate::utils::to_f64_array2(c)?),
+        _ => None,
+    };
     if v.shape()[1] != m {
         return Err(matmul_mismatch(v.shape()[1], m));
+    }
+    // geatpy 2.7.0 does not check the rows of CV (it reads past the end of a short one)
+    let viol: Vec<f64> = match viol {
+        Some(a) => {
+            if a.shape()[0] != n {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "error in refgselect: CV and ObjV disagree. (违反约束程度矩阵的行数必须和目标函数值矩阵的行数相同。)",
+                ));
+            }
+            a.rows()
+                .into_iter()
+                .map(|r| {
+                    let r: Vec<f64> = r.iter().map(|&x| if x < 0.0 { 0.0 } else { x }).collect();
+                    numpy_pairwise_sum(&r)
+                })
+                .collect()
+        }
+        None => vec![0.0; n],
+    };
+    if nv == 0 && n > 0 {
+        return Err(no_reference_points());
     }
     let ou = unit_rows(&obj);
     let norm: Vec<f64> = obj.rows().into_iter().map(|r| sq_norm(r).sqrt()).collect();

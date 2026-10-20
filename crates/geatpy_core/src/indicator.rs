@@ -4,6 +4,18 @@ use rand::Rng;
 
 type Opt<'a, 'py> = Option<&'a Bound<'py, PyAny>>;
 
+/// Parallel must be None, True or False, as geatpy 2.7.0 checks (the value itself is ignored).
+fn check_parallel(parallel: Opt, name: &str) -> PyResult<()> {
+    match parallel {
+        Some(p) if !p.is_none() && !p.is_instance_of::<pyo3::types::PyBool>() => {
+            Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "error in indicator.{name}: Parallel must be None, True or False. (传入参数Parallel必须是None,True或者False。)"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn pair(
     obj_v: &Bound<'_, PyAny>,
     pf: &Bound<'_, PyAny>,
@@ -13,80 +25,110 @@ fn pair(
     let r = crate::utils::to_f64_array2(pf)?;
     if p.shape()[1] != r.shape()[1] {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "error in indicator.{}: ObjV and PF must have the same number of columns.",
-            name
+            "error in indicator.{name}: ObjV and PF disagree. (ObjV和PF的列数必须相同。)"
         )));
     }
     Ok((p, r))
 }
 
-fn sq_dist(a: &Array2<f64>, i: usize, b: &Array2<f64>, k: usize) -> f64 {
+/// Euclidean distance summed left to right like geatpy 2.7.0's `_cdist_eu` (0.0 for no columns).
+fn dist(a: &Array2<f64>, i: usize, b: &Array2<f64>, k: usize) -> f64 {
     (0..a.shape()[1])
-        .map(|j| (a[[i, j]] - b[[k, j]]).powi(2))
-        .sum()
+        .fold(0.0, |s, j| s + (a[[i, j]] - b[[k, j]]).powi(2))
+        .sqrt()
 }
 
-/// Generational distance: sqrt(sum of squared nearest distances to PF) / N.
-#[pyfunction]
-#[pyo3(signature = (obj_v, pf, parallel=None))]
-pub fn GD(obj_v: &Bound<'_, PyAny>, pf: &Bound<'_, PyAny>, parallel: Opt) -> PyResult<f64> {
-    let _ = parallel;
-    let (p, r) = pair(obj_v, pf, "GD")?;
-    let (n, nr) = (p.shape()[0], r.shape()[0]);
-    if n == 0 || nr == 0 {
-        return Ok(0.0);
+/// Smallest distance from row `i` of `a` to the rows of `b`: NaN distances are skipped unless all
+/// of them are NaN (then NaN, as geatpy 2.7.0 gives), and an empty `b` is infinitely far away.
+fn nearest(a: &Array2<f64>, i: usize, b: &Array2<f64>) -> f64 {
+    if b.shape()[0] == 0 {
+        return f64::INFINITY;
     }
-    let s: f64 = (0..n)
-        .map(|i| {
-            (0..nr)
-                .map(|k| sq_dist(&p, i, &r, k))
-                .fold(f64::INFINITY, f64::min)
-        })
-        .sum();
+    (0..b.shape()[0])
+        .map(|k| dist(a, i, b, k))
+        .fold(f64::NAN, f64::min)
+}
+
+/// Generational distance as geatpy 2.7.0 computes it: the norm of the nearest distances (squared
+/// back after the square root, summed in order) divided by N.
+#[pyfunction]
+#[pyo3(signature = (ObjV, PF, params2=None, Parallel=None))]
+#[allow(non_snake_case)]
+pub fn GD(
+    ObjV: &Bound<'_, PyAny>,
+    PF: &Bound<'_, PyAny>,
+    params2: Opt,
+    Parallel: Opt,
+) -> PyResult<f64> {
+    let _ = params2;
+    check_parallel(Parallel, "GD")?;
+    let (p, r) = pair(ObjV, PF, "GD")?;
+    let n = p.shape()[0];
+    if n == 0 {
+        return Err(pyo3::exceptions::PyZeroDivisionError::new_err(
+            "float division by zero",
+        ));
+    }
+    let s = (0..n).fold(0.0, |s, i| {
+        let d = nearest(&p, i, &r);
+        s + d * d
+    });
     Ok(s.sqrt() / n as f64)
 }
 
 /// Inverted generational distance: mean distance from each PF point to its nearest solution.
 #[pyfunction]
-#[pyo3(signature = (obj_v, pf, parallel=None))]
-pub fn IGD(obj_v: &Bound<'_, PyAny>, pf: &Bound<'_, PyAny>, parallel: Opt) -> PyResult<f64> {
-    let _ = parallel;
-    let (p, r) = pair(obj_v, pf, "IGD")?;
-    let (n, nr) = (p.shape()[0], r.shape()[0]);
-    if n == 0 || nr == 0 {
-        return Ok(0.0);
-    }
-    let s: f64 = (0..nr)
-        .map(|k| {
-            (0..n)
-                .map(|i| sq_dist(&p, i, &r, k))
-                .fold(f64::INFINITY, f64::min)
-                .sqrt()
-        })
-        .sum();
+#[pyo3(signature = (ObjV, PF, Parallel=None))]
+#[allow(non_snake_case)]
+pub fn IGD(ObjV: &Bound<'_, PyAny>, PF: &Bound<'_, PyAny>, Parallel: Opt) -> PyResult<f64> {
+    check_parallel(Parallel, "IGD")?;
+    let (p, r) = pair(ObjV, PF, "IGD")?;
+    let nr = r.shape()[0];
+    // the mean over no PF points is NaN, as in the original
+    let s = (0..nr).fold(0.0, |s, k| s + nearest(&r, k, &p));
     Ok(s / nr as f64)
 }
 
-/// Schott's spacing: sample standard deviation of nearest-neighbour Manhattan distances.
+/// Schott's spacing as geatpy 2.7.0 computes it: `np.sqrt(np.var(d) * N / (N - 1))` of the
+/// nearest-neighbour Manhattan distances d, returned as numpy.float64 (NaN for one point).
 #[pyfunction]
-#[pyo3(signature = (obj_v, parallel=None))]
-pub fn Spacing(obj_v: &Bound<'_, PyAny>, parallel: Opt) -> PyResult<f64> {
-    let _ = parallel;
-    let p = crate::utils::to_f64_array2(obj_v)?;
+#[pyo3(signature = (ObjV, params1=None, Parallel=None))]
+#[allow(non_snake_case)]
+pub fn Spacing<'py>(
+    py: Python<'py>,
+    ObjV: &Bound<'py, PyAny>,
+    params1: Opt,
+    Parallel: Opt,
+) -> PyResult<Bound<'py, PyAny>> {
+    use numpy::IntoPyArray;
+    let _ = params1;
+    check_parallel(Parallel, "Spacing")?;
+    let p = crate::utils::to_f64_array2(ObjV)?;
     let (n, m) = (p.shape()[0], p.shape()[1]);
-    if n <= 1 {
-        return Ok(0.0);
+    if n == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "zero-size array to reduction operation minimum which has no identity",
+        ));
     }
+    // np.min over each row of the distance matrix with an infinite diagonal (NaN propagates)
     let d: Vec<f64> = (0..n)
         .map(|i| {
             (0..n)
                 .filter(|&k| k != i)
-                .map(|k| (0..m).map(|j| (p[[i, j]] - p[[k, j]]).abs()).sum::<f64>())
-                .fold(f64::INFINITY, f64::min)
+                .map(|k| (0..m).fold(0.0, |s, j| s + (p[[i, j]] - p[[k, j]]).abs()))
+                .fold(f64::INFINITY, |mn, x| {
+                    if x.is_nan() || mn.is_nan() {
+                        f64::NAN
+                    } else {
+                        mn.min(x)
+                    }
+                })
         })
         .collect();
-    let mean = d.iter().sum::<f64>() / n as f64;
-    Ok((d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt())
+    let np = py.import("numpy")?;
+    let var = np.call_method1("var", (numpy::ndarray::Array1::from(d).into_pyarray(py),))?;
+    let ratio = var.mul(n)?.div(n as i64 - 1)?;
+    np.call_method1("sqrt", (ratio,))
 }
 
 /// Exact hypervolume (minimisation) of `pts` against `refp` by slicing along the last objective.
@@ -100,7 +142,7 @@ fn hv_exact(mut pts: Vec<Vec<f64>>, refp: &[f64]) -> f64 {
         return refp[0] - pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
     }
     if m == 2 {
-        pts.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap());
+        pts.sort_by(|a, b| crate::utils::cmp_nan_last(a[0], b[0]));
         let mut vol = 0.0;
         let mut y = refp[1];
         for p in &pts {
@@ -111,7 +153,7 @@ fn hv_exact(mut pts: Vec<Vec<f64>>, refp: &[f64]) -> f64 {
         }
         return vol;
     }
-    pts.sort_by(|a, b| a[m - 1].partial_cmp(&b[m - 1]).unwrap());
+    pts.sort_by(|a, b| crate::utils::cmp_nan_last(a[m - 1], b[m - 1]));
     let mut vol = 0.0;
     for i in 0..pts.len() {
         let upper = if i + 1 < pts.len() {
@@ -151,35 +193,46 @@ fn hv_monte_carlo(pts: &[Vec<f64>], refp: &[f64], samples: usize) -> f64 {
 /// column (PF defaults to ObjV); the reference point is 1 on every axis and points beyond it are
 /// dropped. Exact for M <= 4, Monte Carlo above.
 #[pyfunction]
-#[pyo3(signature = (obj_v, pf=None, parallel=None))]
-pub fn HV(obj_v: &Bound<'_, PyAny>, pf: Opt, parallel: Opt) -> PyResult<f64> {
-    let _ = parallel;
-    let p = crate::utils::to_f64_array2(obj_v)?;
-    let r = match pf {
+#[pyo3(signature = (ObjV, PF=None, Parallel=None))]
+#[allow(non_snake_case)]
+pub fn HV(ObjV: &Bound<'_, PyAny>, PF: Opt, Parallel: Opt) -> PyResult<f64> {
+    check_parallel(Parallel, "HV")?;
+    let shape_error = || {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "error in indicator.HV: PF must be a matrix and has the same number of columns as ObjV which is more than 0. (PF必须是一个列数至少为1的矩阵且拥有和ObjV一样的列数。)",
+        )
+    };
+    let ndim = |o: &Bound<'_, PyAny>| {
+        o.getattr("ndim")
+            .and_then(|v| v.extract::<usize>())
+            .unwrap_or(2)
+    };
+    if ndim(ObjV) > 2 || PF.is_some_and(|x| !x.is_none() && ndim(x) > 2) {
+        return Err(shape_error());
+    }
+    let p = crate::utils::to_f64_array2(ObjV)?;
+    let r = match PF {
         Some(x) if !x.is_none() => crate::utils::to_f64_array2(x)?,
         _ => p.clone(),
     };
     let (n, m) = (p.shape()[0], p.shape()[1]);
-    if r.shape()[1] != m {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "error in indicator.HV: PF must be a matrix with as many columns as ObjV.",
-        ));
+    if m == 0 || r.shape()[1] != m {
+        return Err(shape_error());
     }
-    if n == 0 || m == 0 {
+    // no point, or no PF to scale by (the original reads uninitialised memory then)
+    if n == 0 || r.shape()[0] == 0 {
         return Ok(0.0);
     }
     let lo: Vec<f64> = (0..m)
         .map(|j| p.column(j).iter().cloned().fold(0.0, f64::min))
         .collect();
+    // NaN entries are skipped; a PF column with nothing but NaN leaves no scale (NaN, like the original)
     let hi: Vec<f64> = (0..m)
-        .map(|j| {
-            1.1 * r
-                .column(j)
-                .iter()
-                .cloned()
-                .fold(f64::NEG_INFINITY, f64::max)
-        })
+        .map(|j| 1.1 * r.column(j).iter().cloned().fold(f64::NAN, f64::max))
         .collect();
+    if hi.iter().any(|h| h.is_nan()) {
+        return Ok(f64::NAN);
+    }
     let inside: Vec<Vec<f64>> = (0..n)
         .map(|i| {
             (0..m)

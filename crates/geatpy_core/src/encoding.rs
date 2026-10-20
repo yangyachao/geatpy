@@ -446,13 +446,14 @@ pub fn crtbp<'py>(
         lind,
         "error in crtbp: Lind must be a int number > 0. (染色体长度Lind必须是大于0的int类型数。)",
     )?;
-    Ok(random_bits(py, nind, lind))
+    random_bits(py, nind, lind)
 }
 
-fn random_bits(py: Python<'_>, nind: usize, lind: usize) -> PyObject {
+fn random_bits(py: Python<'_>, nind: usize, lind: usize) -> PyResult<PyObject> {
+    crate::utils::check_alloc(&[nind, lind], 8, "int64")?;
     let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, lind), |_| rng.gen_range(0..2i64));
-    chrom.into_pyarray(py).into_any().unbind()
+    Ok(chrom.into_pyarray(py).into_any().unbind())
 }
 
 /// FieldDR bounds (validated); `discrete` honours the varTypes row.
@@ -495,6 +496,7 @@ pub fn crtip<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let b = self::field_dr(field_dr)?;
+    crate::utils::check_alloc(&[nind, b.lb.len()], 8, "float64")?;
     let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, b.lb.len()), |(_, j)| {
         uniform_int(b.lb[j], b.ub[j], &mut rng)
@@ -513,6 +515,7 @@ pub fn crtrp<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let b = self::field_dr(field_dr)?;
+    crate::utils::check_alloc(&[nind, b.lb.len()], 8, "float64")?;
     let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, b.lb.len()), |(_, j)| {
         uniform_real(b.lb[j], b.ub[j], &mut rng)
@@ -531,6 +534,7 @@ pub fn crtri<'py>(
 ) -> PyResult<PyObject> {
     let _ = parallel;
     let b = self::field_dr(field_dr)?;
+    crate::utils::check_alloc(&[nind, b.lb.len()], 8, "float64")?;
     let mut rng = crate::utils::rng();
     let chrom = Array2::from_shape_fn((nind, b.lb.len()), |(_, j)| {
         if b.discrete[j] {
@@ -554,6 +558,7 @@ pub fn crtpp<'py>(
     let _ = parallel;
     let b = self::field_dr(field_dr)?;
     let lind = b.lb.len();
+    crate::utils::check_alloc(&[nind, lind], 8, "float64")?;
     if lind == 0 {
         return crate::utils::chrom_out(py, Array2::<f64>::zeros((nind, 0)), true);
     }
@@ -599,7 +604,7 @@ pub fn crtpc<'py>(
                 ));
             }
             let lind = f.row(0).iter().sum::<f64>().round() as usize;
-            Ok(random_bits(py, nind, lind))
+            random_bits(py, nind, lind)
         }
         "RI" => crtri(py, nind, field, parallel),
         "P" => crtpp(py, nind, field, parallel),

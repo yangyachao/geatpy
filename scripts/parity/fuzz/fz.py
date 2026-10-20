@@ -288,6 +288,17 @@ def cases():
         add('mutde_%d' % i, lambda c=ch, F=FDR, x=xr: ea.mutde('RI', c, F, x, 0.5), 1500)
         add('mutde_ft_%d' % i, lambda c=ch, F=FDR, x=xr: ea.mutde('RI', c, F, x, 0.7, 2), 1500)
         add('mutde_m_%d' % i, lambda c=ch, F=FDR, x=xr, m=(np.arange(6 * D).reshape(6, D) % 2 == 0): ea.mutde('RI', c, F, x, 0.5, 1, m), 1500)
+        # random donors (the cases above fix every index); squared outputs also compare the spread,
+        # which tells drawing with replacement from refilling the pool in small populations
+        if i < 4:
+            for tag, x, f, extra in [('none', None, 0.5, []), ('r0', [np.arange(6)], 0.5, []),
+                                     ('two', [None] * 5, [0.5, 0.3], []), ('fnone', [None] * 3, None, []),
+                                     ('fx', [None] * 5, [0.4, None], []), ('ft3', [None] * 5, 0.9, [3]),
+                                     ('ft4', [None] * 5, 0.9, [4]), ('mask4', None, 0.5, [1, 4]),
+                                     ('mask9', [None] * 5, 0.5, [1, 9])]:
+                add('mutde_rnd_%s_%d' % (tag, i), lambda c=ch, F=FDR, x=x, f=f, e=extra: ea.mutde('RI', c, F, x, f, *e) ** 2, 1500)
+            for n in (2, 3, 4):
+                add('mutde_small_%d_%d' % (n, i), lambda c=ch[:n], F=FDR: ea.mutde('RI', c, F, [None] * 5, [0.5, 0.5]) ** 2, 1500)
         for fn in ['mutinv', 'mutmove', 'mutswap']:
             add('%s_RI_%d' % (fn, i), lambda f=getattr(ea, fn), c=ch, F=FDR: f('RI', c, F, 1), 1500)
     for L in [1, 2, 5, 9]:
