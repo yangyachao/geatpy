@@ -702,15 +702,12 @@ pub fn mutde<'py>(
     let all_cols: Vec<usize> = (0..d).collect();
     crate::utils::check_alloc(&[rows, d], 8, "float64")?;
     let mut out = Array2::<f64>::zeros((rows, d));
+    // With no genes there is nothing to compute (the generator is seeded per call, so skipping
+    // the draws is not observable), and a huge integer Mask_N must not loop for nothing.
     if d > 0 {
         let flat_out = out.as_slice_mut().expect("fresh arrays are row-major");
         for (i, row) in flat_out.chunks_exact_mut(d).enumerate() {
             trial(i, &all_cols, &mut rng, row);
-        }
-    } else {
-        // no genes: the donors and F are still drawn, as before
-        for i in 0..rows {
-            trial(i, &all_cols, &mut rng, &mut []);
         }
     }
     crate::utils::ri_out(py, out, &b.discrete)
