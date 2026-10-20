@@ -155,3 +155,8 @@ cython_debug/
 
 # Local reverse-engineering output of the original closed-source _core binaries (not redistributed)
 reverse/
+
+# 2026-10-20 review report and reproduction scripts (kept locally)
+geatpy-rs-review-*.md
+result.json
+review-scripts.zip
