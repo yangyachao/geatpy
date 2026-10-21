@@ -487,9 +487,13 @@ pub fn mselecting<'py>(
         let p = offsets.iter().rposition(|&o| o <= g).unwrap();
         per_pop[p].push(g - offsets[p]);
     }
+    // Every population gets at least its documented minimum. geatpy 2.7.0 only refilled the
+    // populations that got none, so a small one could keep a single individual
+    // (geatpy-dev/geatpy#330); topping up the short ones is the same where nothing is short.
     for (p, chosen) in per_pop.iter_mut().enumerate() {
-        if chosen.is_empty() && sizes[p] > 0 {
-            *chosen = select_by_name(sel_f, &fits[p], mins[p], 2)?;
+        if chosen.len() < mins[p] {
+            let extra = select_by_name(sel_f, &fits[p], mins[p] - chosen.len(), 2)?;
+            chosen.extend(extra);
         }
     }
     let separate = separate.unwrap_or(true);

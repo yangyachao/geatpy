@@ -78,7 +78,8 @@ Rust 内核以官方 geatpy 2.7.0 的 `_core` 二进制为行为基准，通过�
 （如 `A[::-1]`）读错数据、`refselect` 在极点矩阵奇异（如重复极点）时因舍入未能识别而解出无意义的截距（本项目退回列最大值）、
 `crtri` 与 `crtip` 一样在边界为小数时生成越界整数、`mutde` 把 F 列表中的 None 当作另一个因子（文档写明 None 表示随机生成）、
 `mutde` 的 `Mask_N` 为 N 行矩阵时不排除个体自身、`refgselect` 不检查 CV 行数且会就地修改传入的 CV、
-`refselect`/`refgselect` 在参考点集为空时仍给出选择；此外官方二进制在染色体长度为 1 或输入一维时会
+`refselect`/`refgselect` 在参考点集为空时仍给出选择、`mselecting` 只给一个都没选中的种群补选
+（文档保证每个种群至少选 ceil(种群个体数×MSel) 个，[#330](https://github.com/geatpy-dev/geatpy/issues/330)）；此外官方二进制在染色体长度为 1 或输入一维时会
 段错误（`xovsp`/`xovsh` 等），在空种群上抽取 `mutde` 供体时崩溃，`refgselect` 的 Gamma 过短、GD/IGD/HV 的输入为空时读取越界内存，
 Rust 内核正常处理或抛出 Python 异常。
 

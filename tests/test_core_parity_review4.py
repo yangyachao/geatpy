@@ -354,3 +354,18 @@ def test_impossible_sizes_raise_numpy_value_error(call):
 def test_failed_allocations_raise_memory_error(call):
     with pytest.raises(MemoryError, match='Unable to allocate'):
         call()
+
+
+@rust_only  # the original only refills populations that got no individual at all
+@pytest.mark.parametrize('sel', ['dup', 'tour', 'rws', 'sus', 'urs', 'rcs'])
+@pytest.mark.parametrize('msel', [0.5, 0.3, 8])
+def test_mselecting_gives_every_population_its_minimum(sel, msel):
+    # geatpy-dev/geatpy#330: a small population with poor fitness kept a single individual
+    np.random.seed(3)
+    sizes = [100, 124, 16]
+    fits = [np.random.rand(100, 1) + 1, np.random.rand(124, 1) + 1, np.random.rand(16, 1) * 0.01]
+    mins = [int(np.ceil(s * msel)) if msel < 1 else min(int(np.ceil(msel)), s) for s in sizes]
+    for nsel in (150, 300):
+        chosen = ea.mselecting(sel, fits, nsel, msel)
+        assert [len(c) >= m for c, m in zip(chosen, mins)] == [True] * 3
+        assert all(0 <= i < s for c, s in zip(chosen, sizes) for i in c)

@@ -36,6 +36,8 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
   `soea_DE_currentToRand_1_templet` 在 Rastrigin 上比 2.7.0 收敛慢（50×200 中位最优值约 +6，30 维 50×1000 约 93 → 156），
   属预期。`Mask_N` 为恰好 N 行的矩阵时，原版不把个体自身排除在供体之外（与“r0 不等于 i”矛盾），Rust 与整数
   `Mask_N=N` 一样排除。
+- 原版缺陷（上游 issue 确认）：`mselecting` 只给一个都没选中的种群补选，文档保证的每个种群至少 ceil(规模×MSel)
+  个做不到（geatpy-dev/geatpy#330）；Rust 给不足的种群补足下限，其余情形结果与原版相同，总数因此可能多于 NSel。
 - 原版缺陷（第三轮差分确认）：`migrate` 的 `Replacement=1` 总淘汰最后一个个体、`Structure=0` 迁入来源含自身；
   `pbi` 个体在理想点时为 NaN；`cdist` 对非连续数组读错；长度为 1 或一维输入时段错误；
   HV 内部 float32；`sus` 二进制要求至少 3 个参数。
