@@ -241,6 +241,116 @@ Measured on Rastrigin with DE/rand/1/bin (1000 – 5000 variables, 5000 – 2000
 
 ---
 
+## ❓ FAQ
+
+Usage questions that keep coming up in the upstream [geatpy issues](https://github.com/geatpy-dev/geatpy/issues).
+Every snippet has been run.
+
+### "Could not find any feasible solution", although there obviously is one?
+
+Constraints go into the CV matrix returned by `evalVars`, **one column per constraint, and a constraint holds when
+its CV is <= 0**. The usual mistakes are a flipped sign or an equality without a tolerance (floats are almost never
+exactly equal). When no feasible solution is found, `ea.optimize` prints how many individuals of the last generation
+violate each constraint and its smallest value.
+
+```python
+def evalVars(self, Vars):
+    x1, x2 = Vars[:, [0]], Vars[:, [1]]
+    f = x1 ** 2 + x2 ** 2
+    CV = np.hstack([
+        1 - x1 - x2,                     # x1 + x2 >= 1  becomes  1 - x1 - x2 <= 0
+        x1 - 2 * x2,                     # x1 <= 2 * x2
+        np.abs(x1 - 0.3) - 1e-4,         # an equality x1 == 0.3 needs a tolerance
+        np.minimum(x2 - 0.2, 0.8 - x2),  # "or": x2 <= 0.2 or x2 >= 0.8, take the smaller one
+    ])
+    return f, CV
+```
+
+### How do I get every generation, the best k solutions, or continue from a previous run?
+
+```python
+history = []
+def outFunc(alg, pop):  # called after every generation with the current population
+    history.append((alg.currentGen, pop.ObjV.min()))
+
+algorithm = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=100, outFunc=outFunc)
+res = ea.optimize(algorithm, seed=1)
+
+last = res['lastPop']                                       # last population (res['optPop'] is the Pareto set for MOEAs)
+top = last[np.argsort(last.ObjV[:, 0] * problem.maxormins[0])[:10]]  # best 10 of a single-objective run
+print(top.Phen, top.ObjV)
+
+# continue: pass the previous population (or the decision matrix res['Vars']) as prior knowledge
+algorithm2 = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=100)
+res2 = ea.optimize(algorithm2, prophet=res['lastPop'])
+```
+
+### Variables that may only take some values, must skip some values, or must all differ?
+
+- Only a given set of values (which also skips the others): make the variable an integer index and look it up in
+  `evalVars`.
+- Distinct integers: use the permutation encoding `'P'`; there may be fewer variables than values in the range.
+
+```python
+values = np.array([0.5, 1.2, 3.0, 7.5])  # allowed values
+
+class MyProblem(ea.Problem):
+    def __init__(self, Dim=3):
+        # varTypes=1 (integer), indices 0 .. len(values)-1
+        ea.Problem.__init__(self, 'Disc', 1, [1], Dim, [1] * Dim, [0] * Dim, [len(values) - 1] * Dim)
+
+    def evalVars(self, Vars):
+        X = values[Vars.astype(int)]
+        return ((X - 3.1) ** 2).sum(1, keepdims=True)
+
+# 5 distinct integers out of 0 .. 19: use a permutation-encoded population
+# ea.soea_SEGA_templet(problem, ea.Population('P', NIND=40), MAXGEN=200)
+```
+
+### The objective needs extra data or parameters, or I solve it in a loop with different parameters?
+
+Store them as attributes of the problem:
+
+```python
+class Fit(ea.Problem):
+    def __init__(self, data, weight):
+        self.data, self.weight = data, weight
+        ea.Problem.__init__(self, 'Fit', 1, [1], 2, [0, 0], [-10, -10], [10, 10])
+
+    def evalVars(self, Vars):
+        pred = Vars[:, [0]] * self.data[:, 0] + Vars[:, [1]]
+        return ((pred - self.data[:, 1]) ** 2).mean(1, keepdims=True) + self.weight * (Vars ** 2).sum(1, keepdims=True)
+
+for w in (0.0, 0.5):
+    res = ea.optimize(ea.soea_DE_rand_1_bin_templet(Fit(data, w), ea.Population('RI', NIND=30), MAXGEN=200))
+```
+
+### How do I set the crossover and mutation rates?
+
+Change the template's `recOper` (recombination) and `mutOper` (mutation) after creating it:
+
+```python
+algorithm = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=200)
+algorithm.recOper.XOVR = 0.9  # crossover probability
+algorithm.mutOper.Pm = 0.2    # mutation probability
+
+de = ea.soea_DE_rand_1_bin_templet(problem, ea.Population('RI', NIND=50), MAXGEN=200)
+de.mutOper.F = 0.7            # DE scale factor
+de.recOper.XOVR = 0.9         # DE crossover probability
+```
+
+### Other
+
+- **Every run gives a different result**: pass a seed, `ea.optimize(algorithm, seed=1)`; the same code then gives
+  exactly the same result.
+- **Plots and output**: `drawing=0` draws nothing, `1` only the final result, `2` / `3` the objective / decision space
+  live; `drawLog=False` skips the trace plots; `saveFlag=False` saves no files and `dirName` sets the folder;
+  `verbose=False` and `outputMsg=False` turn off the log and the result summary.
+- **The objective is slow**: `evalVars` receives the whole population, so vectorise with numpy; for heavy computations
+  use `multiprocessing` inside it, or torch / a GPU (see "Speeding up the objective function with torch / GPU" above).
+
+---
+
 ## 📊 Architecture and Operators
 
 The Rust core lives in `crates/geatpy_core/` and exports 74 operators with the original names:

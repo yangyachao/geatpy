@@ -217,6 +217,110 @@ if __name__ == '__main__':
 
 ---
 
+## ❓ 常见问题 (FAQ)
+
+下面是上游 [geatpy issues](https://github.com/geatpy-dev/geatpy/issues) 里反复出现的用法问题，示例代码均已实测。
+
+### 提示 “Could not find any feasible solution”，明明有可行解？
+
+约束写在 `evalVars` 返回的 CV 矩阵里，**每一列一个约束，CV <= 0 才算满足**。常见错误是符号写反，或者等式约束没有容差
+（浮点数几乎不可能恰好相等）。求解失败时 `ea.optimize` 会打印最后一代每个约束的违反个数和最小值，便于定位。
+
+```python
+def evalVars(self, Vars):
+    x1, x2 = Vars[:, [0]], Vars[:, [1]]
+    f = x1 ** 2 + x2 ** 2
+    CV = np.hstack([
+        1 - x1 - x2,                     # x1 + x2 >= 1  写成  1 - x1 - x2 <= 0
+        x1 - 2 * x2,                     # x1 <= 2 * x2
+        np.abs(x1 - 0.3) - 1e-4,         # 等式 x1 == 0.3 要留容差
+        np.minimum(x2 - 0.2, 0.8 - x2),  # “或”：x2 <= 0.2 或 x2 >= 0.8，取两者较小值
+    ])
+    return f, CV
+```
+
+### 怎样拿到每一代的结果、前 k 个解，或者接着上次的结果继续算？
+
+```python
+history = []
+def outFunc(alg, pop):  # 每一代结束时调用，pop 是当代种群
+    history.append((alg.currentGen, pop.ObjV.min()))
+
+algorithm = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=100, outFunc=outFunc)
+res = ea.optimize(algorithm, seed=1)
+
+last = res['lastPop']                                       # 最后一代种群（多目标时 res['optPop'] 是非支配解集）
+top = last[np.argsort(last.ObjV[:, 0] * problem.maxormins[0])[:10]]  # 单目标前 10 个解
+print(top.Phen, top.ObjV)
+
+# 继续优化：把上次的种群（或决策变量矩阵 res['Vars']）作为先验知识传入
+algorithm2 = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=100)
+res2 = ea.optimize(algorithm2, prophet=res['lastPop'])
+```
+
+### 变量只能取某几个值、不能取某些值，或者要互不相等？
+
+- 只能取一组给定的值（也可用来剔除某些值）：把变量设成整数下标，在 `evalVars` 里查表。
+- 一组整数互不相等：用排列编码 `'P'`，变量个数可以少于取值范围。
+
+```python
+values = np.array([0.5, 1.2, 3.0, 7.5])  # 允许的取值
+
+class MyProblem(ea.Problem):
+    def __init__(self, Dim=3):
+        # varTypes=1（整数），下标范围 0 ~ len(values)-1
+        ea.Problem.__init__(self, 'Disc', 1, [1], Dim, [1] * Dim, [0] * Dim, [len(values) - 1] * Dim)
+
+    def evalVars(self, Vars):
+        X = values[Vars.astype(int)]
+        return ((X - 3.1) ** 2).sum(1, keepdims=True)
+
+# 5 个互不相等的整数，取自 0 ~ 19：种群用排列编码
+# ea.soea_SEGA_templet(problem, ea.Population('P', NIND=40), MAXGEN=200)
+```
+
+### 目标函数需要额外的数据或参数，或者要在循环里换参数反复求解？
+
+把数据存成问题类的属性：
+
+```python
+class Fit(ea.Problem):
+    def __init__(self, data, weight):
+        self.data, self.weight = data, weight
+        ea.Problem.__init__(self, 'Fit', 1, [1], 2, [0, 0], [-10, -10], [10, 10])
+
+    def evalVars(self, Vars):
+        pred = Vars[:, [0]] * self.data[:, 0] + Vars[:, [1]]
+        return ((pred - self.data[:, 1]) ** 2).mean(1, keepdims=True) + self.weight * (Vars ** 2).sum(1, keepdims=True)
+
+for w in (0.0, 0.5):
+    res = ea.optimize(ea.soea_DE_rand_1_bin_templet(Fit(data, w), ea.Population('RI', NIND=30), MAXGEN=200))
+```
+
+### 怎样设置交叉率、变异率等算子参数？
+
+模板创建后修改它的 `recOper`（重组）和 `mutOper`（变异）：
+
+```python
+algorithm = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=200)
+algorithm.recOper.XOVR = 0.9  # 交叉概率
+algorithm.mutOper.Pm = 0.2    # 变异概率
+
+de = ea.soea_DE_rand_1_bin_templet(problem, ea.Population('RI', NIND=50), MAXGEN=200)
+de.mutOper.F = 0.7            # 差分进化的缩放因子
+de.recOper.XOVR = 0.9         # 差分进化的交叉概率
+```
+
+### 其它
+
+- **每次运行结果都不一样**：传随机种子 `ea.optimize(algorithm, seed=1)`，同样的代码会得到完全相同的结果。
+- **绘图与输出**：`drawing=0` 不画图，`1` 只画最终结果，`2` / `3` 实时画目标空间 / 决策空间；`drawLog=False` 不画迭代曲线；
+  `saveFlag=False` 不保存结果文件，`dirName` 指定保存目录；`verbose=False`、`outputMsg=False` 关闭日志和结果输出。
+- **目标函数很慢**：`evalVars` 一次拿到整个种群，尽量用 numpy 向量化；计算很重时可在其中用 `multiprocessing` 并行，
+  或用 torch / GPU（见上文“用 torch / GPU 加速目标函数”）。
+
+---
+
 ## 📊 架构设计与底层算子覆盖
 
 Rust 内核位于 `crates/geatpy_core/`，导出 74 个算子，名称与原版一致：
