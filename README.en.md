@@ -46,7 +46,7 @@ platform that work on Python 3.8 – 3.15.
 | **ABI** | One build per Python minor version | **PyO3 `abi3`: a single build for every Python 3.8+** |
 | **Prebuilt wheels** | Windows x86/x64, Linux x86_64, macOS (Apple Silicon only for Python 3.8 – 3.10); no Linux ARM64 | **Linux x86_64/ARM64, macOS Universal2, Windows x64** |
 | **Memory safety** | Edge-case input can segfault and kill the Python process | **Safe Rust (the one `unsafe` call runs the FMA-instruction dot product after checking that the CPU has FMA); empty, reversed, oversized and other edge-case input raises a Python exception instead of crashing** |
-| **Parallelism & speed** | C OpenMP | Single-threaded (the `Parallel` argument is accepted for compatibility but has no effect); 0.21 – 1.02× the original's runtime on 36 benchmark cases |
+| **Parallelism & speed** | C OpenMP | Single-threaded (the `Parallel` argument is accepted for compatibility but has no effect); 0.19 – 1.07× the original's runtime on 36 benchmark cases |
 | **API compatibility** | Reference | **Same Python API, data structures and 42 algorithm templates; core behaviour verified against the official 2.7.0 binaries (see below)** |
 
 ---
@@ -125,16 +125,16 @@ Download the wheel for your platform from the [Releases page](https://github.com
 
 ```bash
 # Linux (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
 # Linux (ARM64 / aarch64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
 # macOS (Universal2: Apple Silicon M1/M2/M3/M4 and Intel)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
 
 # Windows (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-win_amd64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-win_amd64.whl
 ```
 
 ### Option 3: build from source
