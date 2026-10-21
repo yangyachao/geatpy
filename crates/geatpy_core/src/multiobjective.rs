@@ -195,7 +195,15 @@ fn ndsort_core<'py>(
 
     let nums = need_num.unwrap_or(n);
     let max_level = need_level.unwrap_or(n);
-    let (lv, cri_level) = if tree && has_nan {
+    let (lv, cri_level) = if !has_nan {
+        // objectives 2..M of the unique rows, contiguous (the first one only orders the rows)
+        let w = m.saturating_sub(1);
+        let pts: Vec<f64> = uobj
+            .chunks(m.max(1))
+            .flat_map(|r| r.iter().skip(1).copied())
+            .collect();
+        front_levels(&pts, w, &rep, n, nums, max_level)
+    } else if tree {
         tens_levels(
             &uobj,
             m,
@@ -281,8 +289,68 @@ fn numpy_unique_rows(py: Python<'_>, obj: &[Vec<f64>]) -> PyResult<UniqueRows> {
     Ok((uni.iter().cloned().collect(), counts, inverse))
 }
 
+/// Efficient non-dominated sort, one complete front per pass. `pts` holds objectives 2..M (`w` of
+/// them) of the unique rows sorted lexicographically, `rep` their multiplicities. Returns the level
+/// of every unique row (0 = unranked) and the last level visited. NaN-free input only.
+///
+/// Only earlier rows can dominate a row (the first objective is sorted), and uniqueness turns
+/// weak dominance into dominance. A row joins the front iff no earlier front member dominates it.
+/// The latest members are checked first: they are the likeliest to dominate it, which keeps long
+/// chains of fronts (such as infeasible rows penalised by their violation) linear per pass. With
+/// two objectives (`w` = 1) the second objective strictly decreases along a front, so only its
+/// last member needs checking.
+fn front_levels(
+    pts: &[f64],
+    w: usize,
+    rep: &[usize],
+    n: usize,
+    nums: usize,
+    max_level: usize,
+) -> (Vec<usize>, usize) {
+    let u = rep.len();
+    let row = |i: usize| &pts[i * w..(i + 1) * w];
+    let dominates = |j: usize, i: usize| row(j).iter().zip(row(i)).all(|(a, b)| a <= b);
+    let mut lv = vec![0usize; u];
+    let mut cri_level = 0usize;
+    let mut sums = 0usize;
+    if nums == 0 {
+        return (lv, cri_level);
+    }
+    let mut front: Vec<usize> = Vec::new();
+    loop {
+        cri_level += 1;
+        if cri_level > max_level {
+            break;
+        }
+        front.clear();
+        for (i, &l) in lv.iter().enumerate() {
+            if l != 0 {
+                continue;
+            }
+            let open = if w == 1 {
+                front.last().is_none_or(|&j| !dominates(j, i))
+            } else {
+                !front.iter().rev().any(|&j| dominates(j, i))
+            };
+            if open {
+                front.push(i);
+            }
+        }
+        for &i in &front {
+            lv[i] = cri_level;
+            sums += rep[i];
+        }
+        if sums >= nums || sums >= n {
+            break;
+        }
+    }
+    (lv, cri_level)
+}
+
 /// Efficient non-dominated sort (ENS-SS) over unique rows sorted lexicographically, one complete
-/// front per pass. Returns the front of every unique row (0 = unranked) and the last front built.
+/// front per pass, compared exactly as geatpy 2.7.0 does. Returns the front of every unique row
+/// (0 = unranked) and the last front built. Used for NaN input only: without NaN it gives the same
+/// fronts as the faster `front_levels`.
 fn ens_levels(
     uobj: &[f64],
     m: usize,
