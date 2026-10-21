@@ -40,7 +40,7 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 | **ABI 兼容性** | 每个 Python 小版本单独构建 | **PyO3 `abi3` 单一构建兼容所有 Python 3.8+ 版本** |
 | **跨平台预编译** | Windows x86/x64、Linux x86_64、macOS（Apple Silicon 仅 Python 3.8 ~ 3.10），无 Linux ARM64 | **全平台官方预编译 Wheel (Linux x86_64/ARM64, macOS Universal2, Windows x64)** |
 | **代码与内存安全** | 边界输入可能触发段错误，导致 Python 进程退出 | **安全 Rust（唯一的 `unsafe` 是确认 CPU 支持 FMA 后调用 FMA 指令版本的点积）；空、反向、超大等边界输入抛出 Python 异常而非段错误** |
-| **多核并行与性能** | C OpenMP 并行 | 非支配排序、参考点选择、距离与 GD/IGD/Spacing 指标在大规模时自动多线程（结果与单线程逐位一致，`ea.set_num_threads()` / `GEATPY_NUM_THREADS` 设置线程数），其余算子单线程（`Parallel` 参数为兼容保留，不生效）；36 个经典用例耗时为原版的 0.21~1.02 倍 |
+| **多核并行与性能** | C OpenMP 并行 | 非支配排序、参考点选择、距离与 GD/IGD/Spacing 指标在大规模时自动多线程（结果与单线程逐位一致，`ea.set_num_threads()` / `GEATPY_NUM_THREADS` 设置线程数），其余算子单线程（`Parallel` 参数为兼容保留，不生效）；36 个经典用例耗时为原版的 0.19~1.07 倍 |
 | **API 兼容度** | 原版基准 | **沿用原有 Python API、数据结构与 42 个算法模板；内核行为已与官方 2.7.0 二进制逐项对照验证（见下文）** |
 
 > **多线程说明**：默认线程数为逻辑 CPU 数（设置的线程数也不会超过它）。同时运行多个 geatpy 进程时（批量任务、
@@ -104,7 +104,7 @@ pip install geatpy-rs
 
 > 💡 **提示**：分发包名为 `geatpy-rs`，在 Python 代码中完全无需改动，继续沿用熟悉的 **`import geatpy as ea`** 即可无缝调用！
 
-> 🧪 **预览版**：2.8.0b1 是多线程预览版（不含 GPU），`pip install` 默认仍安装 2.7.4 稳定版，试用请加 `--pre`：
+> 🧪 **预览版**：2.8.0b1 是多线程预览版（不含 GPU），`pip install` 默认仍安装 2.7.5 稳定版，试用请加 `--pre`：
 > `pip install --pre geatpy-rs`。
 
 ### 方式二：从 GitHub Releases 下载预编译 Wheel
@@ -113,16 +113,16 @@ pip install geatpy-rs
 
 ```bash
 # Linux (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
 # Linux (ARM64 / aarch64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
 # macOS (Universal2 - 支持 Apple Silicon M1/M2/M3/M4 以及 Intel Mac)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
 
 # Windows (x86_64)
-pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.4/geatpy_rs-2.7.4-cp38-abi3-win_amd64.whl
+pip install https://github.com/yangyachao/geatpy/releases/download/v2.7.5/geatpy_rs-2.7.5-cp38-abi3-win_amd64.whl
 ```
 
 ### 方式三：从源码本地构建
