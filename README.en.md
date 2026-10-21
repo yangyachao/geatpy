@@ -31,8 +31,9 @@ The core of the original Geatpy is distributed only as prebuilt binaries, which 
    with a segmentation fault, and several operators behave differently from their own documentation.
 
 This project therefore **rewrites all 74 core operators in Rust (PyO3 + abi3)**, keeps the Python layer (algorithm
-templates, `Problem`, `Population`, ...) unchanged, and ships prebuilt wheels for every platform that work on
-Python 3.8 – 3.15.
+templates, `Problem`, `Population`, ...) and its interfaces (fixing only a few defects of the original and
+dropping redundant array copies when populations are sliced or merged), and ships prebuilt wheels for every
+platform that work on Python 3.8 – 3.15.
 
 ---
 
@@ -194,6 +195,43 @@ if __name__ == '__main__':
     )
     res = ea.optimize(algorithm, verbose=True, drawing=1, outputMsg=True, drawLog=True)
 ```
+
+### Speeding up the objective function with torch / GPU
+
+The Rust core runs on the CPU only and has no GPU support. When the objective function is expensive, compute it with
+PyTorch (or CuPy) inside `evalVars` and convert the result back to a numpy array:
+
+```python
+import numpy as np
+import torch
+import geatpy as ea
+
+dev = 'cuda' if torch.cuda.is_available() else 'cpu'  # on Apple silicon use 'mps'
+
+class Rastrigin(ea.Problem):
+    def __init__(self, D=1000):
+        ea.Problem.__init__(self, 'Rastrigin', 1, [1], D, [0] * D, [-5.12] * D, [5.12] * D)
+
+    def evalVars(self, Vars):
+        x = torch.as_tensor(Vars, device=dev, dtype=torch.float32)  # numpy -> torch (CPU or GPU)
+        f = 10 * self.Dim + (x ** 2 - 10 * torch.cos(2 * torch.pi * x)).sum(1, keepdim=True)
+        return f.cpu().numpy().astype(np.float64)  # hand a float64 numpy array back to the core
+
+if __name__ == '__main__':
+    algorithm = ea.soea_DE_rand_1_bin_templet(Rastrigin(), ea.Population(Encoding='RI', NIND=5000),
+                                              MAXGEN=50, logTras=0)
+    res = ea.optimize(algorithm, seed=1, verbose=False, drawing=0, outputMsg=False, saveFlag=False)
+```
+
+Measured on Rastrigin with DE/rand/1/bin (1000 – 5000 variables, 5000 – 20000 individuals):
+
+- The evaluation alone runs 13 – 16 times faster with CUDA on a Colab Tesla T4 and 8 – 15 times faster with MPS on an
+  Apple M2 Pro than with numpy, but torch with float32 on the CPU already gets most of that (2 – 10 times faster).
+- A whole run is only about 25% – 35% faster: for an element-wise objective like Rastrigin, evaluation is only a small
+  part of the run and the rest is spent in the core and the Python layer. The GPU pays off when the objective is a
+  heavy computation such as a simulation or a neural network.
+- The population is copied between numpy and the GPU every generation, so with few individuals (a few hundred or
+  fewer) the GPU is slower; MPS has no float64.
 
 ---
 
