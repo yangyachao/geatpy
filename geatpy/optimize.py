@@ -142,6 +142,7 @@ def optimize(algorithm,
                 print()
             else:
                 print('Optimization fail: Could not find any feasible solution.')
+                _print_infeasible_hint(lastPop)
         else:
             if optPop.sizes != 0:
                 print('The number of non-dominated solutions is: %d' % optPop.sizes)
@@ -153,6 +154,7 @@ def optimize(algorithm,
                 print('spacing: %.5f' % result['spacing'])
             else:
                 print('Optimization fail: Could not find any feasible solution.')
+                _print_infeasible_hint(lastPop)
     # 根据算法执行日志绘制迭代变化曲线
     if drawLog and algorithm.log is not None:
         if algorithm.problem.M == 1:
@@ -201,3 +203,19 @@ def optimize(algorithm,
             file.write(str(resultInfo))
 
     return result
+
+
+def _print_infeasible_hint(pop):
+    # 没有可行解时，指出最后一代种群在哪些约束上违反、违反了多少，便于检查CV的写法
+    CV = getattr(pop, 'CV', None)
+    if CV is None or pop.sizes == 0:
+        return
+    CV = np.asarray(CV, dtype=float)
+    print('Constraint violation of the last population (CV <= 0 means satisfied. 最后一代种群的约束违反情况，CV <= 0 为满足):')
+    for j in range(CV.shape[1]):
+        col = CV[:, j]
+        bad = int(np.sum(~(col <= 0)))  # NaN 也算违反
+        smallest = np.nanmin(col) if not np.all(np.isnan(col)) else np.nan
+        print('  CV[:, %d]: %d/%d individuals violate it, smallest value %.6g' % (j, bad, len(col), smallest))
+    print('  Write g(x) <= b as CV = g(x) - b; an equality h(x) = 0 needs a tolerance, e.g. CV = |h(x)| - 1e-6.'
+          ' (约束 g(x) <= b 写成 CV = g(x) - b；等式约束 h(x) = 0 需要容差，如 CV = |h(x)| - 1e-6。)')
