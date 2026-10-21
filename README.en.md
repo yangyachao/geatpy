@@ -296,6 +296,10 @@ algorithm2 = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=
 res2 = ea.optimize(algorithm2, prophet=res['lastPop'])
 ```
 
+To watch the evolution (for example a travelling-salesman tour getting shorter), see `demo/soea_demo/soea_demo12`: it
+records the best tour of every generation with `outFunc` and saves a GIF (current best tour on the left, convergence
+curve on the right).
+
 ### Variables that may only take some values, must skip some values, or must all differ?
 
 - Only a given set of values (which also skips the others): make the variable an integer index and look it up in

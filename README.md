@@ -267,6 +267,9 @@ algorithm2 = ea.soea_SEGA_templet(problem, ea.Population('RI', NIND=50), MAXGEN=
 res2 = ea.optimize(algorithm2, prophet=res['lastPop'])
 ```
 
+想直观看到进化过程（例如旅行商路线逐代变短），可参考 `demo/soea_demo/soea_demo12`：用 `outFunc` 记录每一代的最优路线，
+求解后保存为 GIF 动画（左边当代最优路线，右边收敛曲线）。
+
 ### 变量只能取某几个值、不能取某些值，或者要互不相等？
 
 - 只能取一组给定的值（也可用来剔除某些值）：把变量设成整数下标，在 `evalVars` 里查表。
