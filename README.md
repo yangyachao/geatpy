@@ -25,7 +25,8 @@ The High-Performance Genetic and Evolutionary Algorithm Toolbox for Python, Powe
 2. **ARM 平台覆盖不全**: 原版的 Apple Silicon 轮子只覆盖 Python 3.8 ~ 3.10，且没有 Linux ARM64 (aarch64) 轮子，在 ARM 云服务器、树莓派与 Docker 容器里装不上。
 3. **二进制内核难排错**: 长度为 1 的染色体、一维输入等边界情况会直接段错误，整个 Python 进程退出；还有多处行为与其自身文档不符。
 
-为此，**本项目用 Rust (PyO3 + abi3) 重写了全部 74 个内核算子**，Python 层（算法模板、`Problem`、`Population` 等）原样保留，
+为此，**本项目用 Rust (PyO3 + abi3) 重写了全部 74 个内核算子**，Python 层（算法模板、`Problem`、`Population` 等）沿用原版、接口不变
+（只修正了原版的几处缺陷，并去掉了种群切片与合并时多余的数组复制），
 提供 Python 3.8 ~ 3.15 通用的全平台预编译 Wheel。
 
 ---
@@ -183,6 +184,41 @@ if __name__ == '__main__':
     )
     res = ea.optimize(algorithm, verbose=True, drawing=1, outputMsg=True, drawLog=True)
 ```
+
+### 用 torch / GPU 加速目标函数
+
+Rust 内核只在 CPU 上运行，不直接支持 GPU。目标函数较重时，可以在 `evalVars` 里用 PyTorch（或 CuPy）计算，
+返回前转回 numpy 数组：
+
+```python
+import numpy as np
+import torch
+import geatpy as ea
+
+dev = 'cuda' if torch.cuda.is_available() else 'cpu'  # Apple 芯片可用 'mps'
+
+class Rastrigin(ea.Problem):
+    def __init__(self, D=1000):
+        ea.Problem.__init__(self, 'Rastrigin', 1, [1], D, [0] * D, [-5.12] * D, [5.12] * D)
+
+    def evalVars(self, Vars):
+        x = torch.as_tensor(Vars, device=dev, dtype=torch.float32)  # numpy → torch（CPU 或 GPU）
+        f = 10 * self.Dim + (x ** 2 - 10 * torch.cos(2 * torch.pi * x)).sum(1, keepdim=True)
+        return f.cpu().numpy().astype(np.float64)  # 交回内核前转回 float64 的 numpy 数组
+
+if __name__ == '__main__':
+    algorithm = ea.soea_DE_rand_1_bin_templet(Rastrigin(), ea.Population(Encoding='RI', NIND=5000),
+                                              MAXGEN=50, logTras=0)
+    res = ea.optimize(algorithm, seed=1, verbose=False, drawing=0, outputMsg=False, saveFlag=False)
+```
+
+实测（Rastrigin + DE/rand/1/bin，1000～5000 维、5000～20000 个体）：
+
+- 只看求值，Colab Tesla T4 上 CUDA 比 numpy 快 13～16 倍，Apple M2 Pro 的 MPS 快 8～15 倍；但 torch 在 CPU 上用 float32
+  已能拿到大部分收益（比 numpy 快 2～10 倍）。
+- 整次运行只快约 25%～35%：像 Rastrigin 这样逐元素计算量小的函数，求值本来只占小头，其余时间在内核与 Python 层。
+  目标函数是仿真、神经网络等重计算时，GPU 的收益才明显。
+- 每代都要在 numpy 与 GPU 之间来回拷贝种群，个体数很少（几百以内）时 GPU 反而更慢；MPS 不支持 float64。
 
 ---
 
