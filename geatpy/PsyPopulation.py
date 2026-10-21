@@ -130,6 +130,16 @@ PsyPopulation : class - 多染色体种群类(Popysomy Population)
         self.CV = CV.copy() if CV is not None else None
         self.Phen = Phen.copy() if Phen is not None else None
 
+    @staticmethod
+    def _owning(Encodings, Fields, NIND, Chroms, ObjV, FitnV, CV, Phen, EncoIdxs):
+        # 与 PsyPopulation(...) 相同，但直接接管调用者刚生成、别处没有引用的新数组，不再复制一遍（供花式索引与合并使用）。
+        pop = PsyPopulation(Encodings, Fields, NIND, EncoIdxs=EncoIdxs)
+        if Encodings is not None and Chroms is not None:
+            pop.Chroms = list(Chroms)
+            pop.Linds = [Chrom.shape[1] if Chrom is not None else 0 for Chrom in Chroms]
+        pop.ObjV, pop.FitnV, pop.CV, pop.Phen = ObjV, FitnV, CV, Phen
+        return pop
+
     def initChrom(self, NIND=None):
 
         """
@@ -232,15 +242,17 @@ PsyPopulation : class - 多染色体种群类(Popysomy Population)
                 if self.Chroms[i] is None:
                     raise RuntimeError('error in PsyPopulation: Chrom[i] is None. (种群染色体矩阵未初始化。)')
                 NewChroms.append(self.Chroms[i][index_array])
-        return PsyPopulation(self.Encodings,
-                             self.Fields,
-                             NIND,
-                             NewChroms,
-                             self.ObjV[index_array] if self.ObjV is not None else None,
-                             self.FitnV[index_array] if self.FitnV is not None else None,
-                             self.CV[index_array] if self.CV is not None else None,
-                             self.Phen[index_array] if self.Phen is not None else None,
-                             self.EncoIdxs)
+        # slice 得到的是视图，需要复制；花式索引已经得到新数组，直接接管
+        return (PsyPopulation if isinstance(index_array, slice) else PsyPopulation._owning)(
+            self.Encodings,
+            self.Fields,
+            NIND,
+            NewChroms,
+            self.ObjV[index_array] if self.ObjV is not None else None,
+            self.FitnV[index_array] if self.FitnV is not None else None,
+            self.CV[index_array] if self.CV is not None else None,
+            self.Phen[index_array] if self.Phen is not None else None,
+            self.EncoIdxs)
 
     def shuffle(self):
 
@@ -341,18 +353,18 @@ PsyPopulation : class - 多染色体种群类(Popysomy Population)
                     raise RuntimeError('error in PsyPopulation: Chrom is None. (种群染色体矩阵未初始化。)')
                 NewChroms[i] = np.vstack([self.Chroms[i], pop.Chroms[i]])
         NIND = self.sizes + pop.sizes  # 得到合并种群的个体数
-        return PsyPopulation(self.Encodings,
-                             self.Fields,
-                             NIND,
-                             NewChroms,
-                             np.vstack(
-                                 [self.ObjV, pop.ObjV]) if self.ObjV is not None and pop.ObjV is not None else None,
-                             np.vstack(
-                                 [self.FitnV, pop.FitnV]) if self.FitnV is not None and pop.FitnV is not None else None,
-                             np.vstack([self.CV, pop.CV]) if self.CV is not None and pop.CV is not None else None,
-                             np.vstack(
-                                 [self.Phen, pop.Phen]) if self.Phen is not None and pop.Phen is not None else None,
-                             self.EncoIdxs)
+        return PsyPopulation._owning(self.Encodings,
+                                    self.Fields,
+                                    NIND,
+                                    NewChroms,
+                                    np.vstack(
+                                        [self.ObjV, pop.ObjV]) if self.ObjV is not None and pop.ObjV is not None else None,
+                                    np.vstack(
+                                        [self.FitnV, pop.FitnV]) if self.FitnV is not None and pop.FitnV is not None else None,
+                                    np.vstack([self.CV, pop.CV]) if self.CV is not None and pop.CV is not None else None,
+                                    np.vstack(
+                                        [self.Phen, pop.Phen]) if self.Phen is not None and pop.Phen is not None else None,
+                                    self.EncoIdxs)
 
     def __len__(self):
 

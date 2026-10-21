@@ -97,6 +97,16 @@ Population : class - 种群类
         self.CV = CV.copy() if CV is not None else None
         self.Phen = Phen.copy() if Phen is not None else None
 
+    @staticmethod
+    def _owning(Encoding, Field, NIND, Chrom, ObjV, FitnV, CV, Phen):
+        # 与 Population(...) 相同，但直接接管调用者刚生成、别处没有引用的新数组，不再复制一遍（供花式索引与合并使用）。
+        pop = Population(Encoding, Field, NIND)
+        if Encoding is not None:
+            pop.Chrom = Chrom
+            pop.Lind = Chrom.shape[1] if Chrom is not None else 0
+        pop.ObjV, pop.FitnV, pop.CV, pop.Phen = ObjV, FitnV, CV, Phen
+        return pop
+
     def initChrom(self, NIND=None):
 
         """
@@ -191,14 +201,16 @@ Population : class - 种群类
             if self.Chrom is None:
                 raise RuntimeError('error in Population: Chrom is None. (种群染色体矩阵未初始化。)')
             NewChrom = self.Chrom[index_array]
-        return Population(self.Encoding,
-                          self.Field,
-                          NIND,
-                          NewChrom,
-                          self.ObjV[index_array] if self.ObjV is not None else None,
-                          self.FitnV[index_array] if self.FitnV is not None else None,
-                          self.CV[index_array] if self.CV is not None else None,
-                          self.Phen[index_array] if self.Phen is not None else None)
+        # slice 得到的是视图，需要复制；花式索引已经得到新数组，直接接管
+        return (Population if isinstance(index_array, slice) else Population._owning)(
+            self.Encoding,
+            self.Field,
+            NIND,
+            NewChrom,
+            self.ObjV[index_array] if self.ObjV is not None else None,
+            self.FitnV[index_array] if self.FitnV is not None else None,
+            self.CV[index_array] if self.CV is not None else None,
+            self.Phen[index_array] if self.Phen is not None else None)
 
     def shuffle(self):
 
@@ -299,15 +311,15 @@ Population : class - 种群类
                     raise RuntimeError('error in Population: Field disagree. (两者的译码矩阵必须一致。)')
             NewChrom = np.vstack([self.Chrom, pop.Chrom])
         NIND = self.sizes + pop.sizes  # 得到合并种群的个体数
-        return Population(self.Encoding,
-                          self.Field,
-                          NIND,
-                          NewChrom,
-                          np.vstack([self.ObjV, pop.ObjV]) if self.ObjV is not None and pop.ObjV is not None else None,
-                          np.vstack(
-                              [self.FitnV, pop.FitnV]) if self.FitnV is not None and pop.FitnV is not None else None,
-                          np.vstack([self.CV, pop.CV]) if self.CV is not None and pop.CV is not None else None,
-                          np.vstack([self.Phen, pop.Phen]) if self.Phen is not None and pop.Phen is not None else None)
+        return Population._owning(self.Encoding,
+                                  self.Field,
+                                  NIND,
+                                  NewChrom,
+                                  np.vstack([self.ObjV, pop.ObjV]) if self.ObjV is not None and pop.ObjV is not None else None,
+                                  np.vstack(
+                                      [self.FitnV, pop.FitnV]) if self.FitnV is not None and pop.FitnV is not None else None,
+                                  np.vstack([self.CV, pop.CV]) if self.CV is not None and pop.CV is not None else None,
+                                  np.vstack([self.Phen, pop.Phen]) if self.Phen is not None and pop.Phen is not None else None)
 
     def __len__(self):
 
