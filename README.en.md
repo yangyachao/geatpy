@@ -103,7 +103,9 @@ exactly at the ideal point, `cdist` reads non-contiguous arrays (such as `A[::-1
 `crtri` produces out-of-range integers for fractional bounds like `crtip`, `mutde` replaces a None in an F list with the
 other factor (the documentation says None means random), `mutde` with an N-row `Mask_N` matrix does not exclude the
 individual itself from the donors, `refgselect` does not check the rows of CV and modifies the caller's CV in place, and
-`refselect`/`refgselect` still select individuals when there is no reference point. The official binaries also segfault
+`refselect`/`refgselect` still select individuals when there is no reference point, and `mselecting` only refills
+populations that got no individual at all (the documentation guarantees ceil(size × MSel) per population,
+[#330](https://github.com/geatpy-dev/geatpy/issues/330)). The official binaries also segfault
 on length-1 chromosomes or 1-D input (`xovsp`/`xovsh`, ...), crash when `mutde` draws donors from an empty population,
 and read out of bounds for a short `refgselect` Gamma or empty GD/IGD/HV input; the Rust core handles these or raises a
 Python exception.
@@ -206,6 +208,10 @@ if __name__ == '__main__':
     )
     res = ea.optimize(algorithm, verbose=True, drawing=1, outputMsg=True, drawLog=True)
 ```
+
+> 💡 For long runs, pass `progress=True` to `ea.optimize` to show a one-line progress bar in the terminal (it follows
+> whichever of MAXGEN, MAXTIME and MAXEVALS is closest to its limit, redraws at most every 0.2 s and does not change
+> the results).
 
 ### Speeding up the objective function with torch / GPU
 
