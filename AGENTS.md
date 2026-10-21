@@ -10,7 +10,9 @@ geatpy 2.7.0 的 Python 层原样保留，闭源 Cython 内核 `_core` 用 Rust 
   `selection.rs`（选择、ranking/scaling/powing/indexing、otos、ecs）、`recombination.rs`（rec*、xov*、recombin）、`mutation.rs`（mut*、mutate）、
   `multiobjective.rs`（ndsort*、crowdis、cdist、mergecv、tcheby、pbi、awGA、rwGA、crtidp、refselect、refgselect、
   migrate）、`indicator.rs`（GD、IGD、Spacing、HV）、`utils.rs`（参数解析、FixType 修复、int32 输出）。
-- `geatpy/`：原版 Python 层（算法模板、Problem、Population 等），一般不改。
+- `geatpy/`：原版 Python 层（算法模板、Problem、Population 等），一般不改；只修原版缺陷，或做不改变行为的性能优化
+  （如 `Population`/`PsyPopulation` 的花式索引与合并直接接管新数组、不再二次复制，`stat()` 只取最优个体）。
+  改后用同一种子对比各模板的结果哈希，并保证新种群与原种群不共享内存（`tests/test_population_copy.py`）。
 - `tests/`：`test_core_parity.py` 与官方二进制的黑盒差分（期望值在 `tests/fixtures/core_parity_orig_2_7_0.json`）；
   `test_core_parity_review.py` 逆向复核得到的回归用例。
 - `reverse/`（已 gitignore，只在本机）：官方 `_core` 的反编译结果，仅供审查。

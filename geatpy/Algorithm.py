@@ -732,8 +732,7 @@ class SoeaAlgorithm(Algorithm):  # 单目标优化算法类父类
         # 进行进化记录
         feasible = np.where(np.all(pop.CV <= 0, 1))[0] if pop.CV is not None else np.arange(pop.sizes)  # 找到满足约束条件的个体的下标
         if len(feasible) > 0:
-            feasiblePop = pop[feasible]
-            bestIndi = feasiblePop[np.argmax(feasiblePop.FitnV)]  # 获取最优个体
+            bestIndi = pop[feasible[np.argmax(pop.FitnV[feasible])]]  # 获取最优个体（不必先复制整个可行种群）
             if self.BestIndi.sizes == 0:
                 self.BestIndi = bestIndi  # 初始化global best individual
             else:
@@ -749,9 +748,9 @@ class SoeaAlgorithm(Algorithm):  # 单目标优化算法类父类
                     self.BestIndi = bestIndi
             # 更新trace
             self.trace['f_best'].append(bestIndi.ObjV[0][0])
-            self.trace['f_avg'].append(np.mean(feasiblePop.ObjV))
+            self.trace['f_avg'].append(np.mean(pop.ObjV[feasible]))
             if self.logTras != 0 and self.currentGen % self.logTras == 0:
-                self.logging(feasiblePop)  # 记录日志
+                self.logging(pop[feasible])  # 记录日志
                 if self.verbose:
                     self.display()  # 打印日志
             self.draw(self.BestIndi)  # 展示输出
