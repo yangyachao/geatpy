@@ -177,6 +177,9 @@ if __name__ == '__main__':
     res = ea.optimize(algorithm, verbose=True, drawing=1, outputMsg=True, drawLog=True)
 ```
 
+> 💡 运行时间较长时，可以给 `ea.optimize` 传 `progress=True`，在终端显示一行进度条（按 MAXGEN、MAXTIME、MAXEVALS 中
+> 进展最快的一个计算，最多每 0.2 秒刷新一次，不影响结果）。
+
 ### 用 torch / GPU 加速目标函数
 
 Rust 内核只在 CPU 上运行，不直接支持 GPU。目标函数较重时，可以在 `evalVars` 里用 PyTorch（或 CuPy）计算，

@@ -15,6 +15,7 @@ def optimize(algorithm,
              drawLog=True,
              saveFlag=True,
              dirName=None,
+             progress=False,
              **kwargs):
 
     """
@@ -48,6 +49,9 @@ def optimize(algorithm,
         saveFlag  : bool - 控制是否保存结果。
 
         dirName   : str  - 文件保存的路径。当缺省或为None时，默认保存在当前工作目录的'result of job xxxx-xx-xx xxh-xxm-xxs'文件夹下。
+
+        progress  : bool - 是否在终端显示一行进度条（按MAXGEN、MAXTIME、MAXEVALS中进展最快的一个计算），缺省为False。
+                           进度条最多每0.2秒刷新一次，不影响求解结果。
 
     输出参数:
         result    : dict - 一个保存着结果的字典。内容为：
@@ -100,6 +104,7 @@ def optimize(algorithm,
     # 参数设置
     algorithm.verbose = verbose if verbose is not None else algorithm.verbose
     algorithm.drawing = drawing if drawing is not None else algorithm.drawing
+    algorithm.progress = progress
     # 开始求解
     [optPop, lastPop] = algorithm.run(prophetPop)
     # 生成结果

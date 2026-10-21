@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import sys
 import time
 import warnings
 import numpy as np
@@ -120,6 +121,9 @@ Algorithm : class - 算法类的顶级父类
         self.evalsNum = None
         self.log = None
         self.stopMsg = ''
+        self.progress = False  # 是否在终端显示进度条（optimize(progress=True) 时打开）
+        self._progressLen = 0  # 当前进度条所占的字符数，0 表示没有显示
+        self._progressAt = 0.0  # 上次刷新进度条的时间
         # 初始化种群的译码矩阵
         if isinstance(population, ea.Population):
             if population.ChromNum == 1:  # 如果是单染色体种群
@@ -216,6 +220,37 @@ Algorithm : class - 算法类的顶级父类
             if not isinstance(pop.CV, np.ndarray) or pop.CV.ndim != 2 or pop.CV.shape[0] != pop.sizes:
                 raise RuntimeError('error: CV is illegal. (违反约束程度矩阵CV的数据格式不合法，请检查CV的计算。)')
 
+    def showProgress(self, finished=False):
+
+        """
+        描述:
+            在终端用一行进度条显示进化进度，由terminated()在progress为True时调用。
+            进度取MAXGEN、MAXTIME、MAXEVALS三种限制中进展最快的一个；最多每0.2秒刷新一次，结束时换行。
+
+        """
+
+        now = time.time()
+        if not finished and now - self._progressAt < 0.2:
+            return
+        self._progressAt = now
+        ratios = []
+        if self.MAXGEN:
+            ratios.append((self.currentGen + 1) / self.MAXGEN)
+        if self.MAXTIME:
+            ratios.append(self.passTime / self.MAXTIME)
+        if self.MAXEVALS:
+            ratios.append(self.evalsNum / self.MAXEVALS)
+        ratio = min(max(ratios, default=0.0), 1.0)
+        filled = int(ratio * 30)
+        line = '[{}{}] {:5.1f}%  gen {}  {:.1f}s'.format('#' * filled, '.' * (30 - filled), ratio * 100,
+                                                         self.currentGen + 1, self.passTime)
+        if finished and self.verbose and self.logTras != 0:  # 日志表格随后会打印最后一代，不再保留进度条
+            sys.stdout.write('\r' + ' ' * self._progressLen + '\r')
+        else:
+            sys.stdout.write('\r' + line.ljust(self._progressLen) + ('\n' if finished else ''))
+        self._progressLen = 0 if finished else len(line)
+        sys.stdout.flush()
+
     def display(self):
 
         """
@@ -226,6 +261,9 @@ Algorithm : class - 算法类的顶级父类
         """
 
         self.passTime += time.time() - self.timeSlot  # 更新用时记录，不计算display()的耗时
+        if self._progressLen:  # 先擦掉进度条，日志表格打印在它原来的位置，之后的进度条显示在表格下方
+            sys.stdout.write('\r' + ' ' * self._progressLen + '\r')
+            self._progressLen = 0
         headers = []
         widths = []
         values = []
@@ -485,6 +523,8 @@ class MoeaAlgorithm(Algorithm):  # 多目标优化算法类的父类
         if self.MAXEVALS is not None and self.evalsNum >= self.MAXEVALS:
             self.stopMsg = 'The algotirhm stepped because it exceeded the function evaluation limit.'
             terminatedFlag = True
+        if self.progress:
+            self.showProgress(terminatedFlag)
         if terminatedFlag:
             return True
         else:
@@ -795,6 +835,8 @@ class SoeaAlgorithm(Algorithm):  # 单目标优化算法类父类
         if self.trappedCount >= self.maxTrappedCount:
             self.stopMsg = 'The algotirhm stepped because it exceeded the trapped count limit.'
             terminatedFlag = True
+        if self.progress:
+            self.showProgress(terminatedFlag)
         if terminatedFlag:
             return True
         else:

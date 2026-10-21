@@ -198,6 +198,10 @@ if __name__ == '__main__':
     res = ea.optimize(algorithm, verbose=True, drawing=1, outputMsg=True, drawLog=True)
 ```
 
+> 💡 For long runs, pass `progress=True` to `ea.optimize` to show a one-line progress bar in the terminal (it follows
+> whichever of MAXGEN, MAXTIME and MAXEVALS is closest to its limit, redraws at most every 0.2 s and does not change
+> the results).
+
 ### Speeding up the objective function with torch / GPU
 
 The Rust core runs on the CPU only and has no GPU support. When the objective function is expensive, compute it with
